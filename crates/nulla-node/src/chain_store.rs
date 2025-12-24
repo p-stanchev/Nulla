@@ -52,6 +52,12 @@ impl ChainDb {
         }
     }
 
+    pub fn has_block(&self, hash: &Hash32) -> Result<bool, String> {
+        self.blocks
+            .contains_key(hash.as_bytes())
+            .map_err(|e| e.to_string())
+    }
+
     pub fn get_index(&self, hash: &Hash32) -> Result<Option<IndexRecord>, String> {
         if let Some(bytes) = self.index.get(hash.as_bytes()).map_err(|e| e.to_string())? {
             let rec = IndexRecord::try_from_slice(&bytes).map_err(|e| e.to_string())?;
@@ -69,6 +75,85 @@ impl ChainDb {
         } else {
             Ok(None)
         }
+    }
+
+    pub fn ensure_genesis(&self, genesis: &Block) -> Result<(), String> {
+        let indices = self.all_indices()?;
+        if indices.is_empty() {
+            let work = work_from_bits(genesis.header.bits).map_err(|e| e.to_string())?;
+            let idx = IndexRecord {
+                height: 0,
+                bits: genesis.header.bits,
+                timestamp: genesis.header.timestamp,
+                prev: genesis.header.prev,
+                cumulative_work: work.to_bytes_be(),
+            };
+            self.upsert_block(Hash32::from(GENESIS_HASH_BYTES), genesis, &idx, Some(Hash32::from(GENESIS_HASH_BYTES)))?;
+        }
+        Ok(())
+    }
+
+    pub fn best_tip_by_work(&self) -> Result<Option<Hash32>, String> {
+        let mut best: Option<(Hash32, BigUint)> = None;
+        for (h, rec) in self.all_indices()? {
+            let work = BigUint::from_bytes_be(&rec.cumulative_work);
+            if let Some((bh, bw)) = &best {
+                if tip_is_better(&work, &h, bw, bh) {
+                    best = Some((h, work));
+                }
+            } else {
+                best = Some((h, work));
+            }
+        }
+        Ok(best.map(|(h, _)| h))
+    }
+
+    pub fn chain_from_tip(&self, tip: Hash32) -> Result<Vec<Hash32>, String> {
+        let mut map = HashMap::new();
+        for (h, rec) in self.all_indices()? {
+            map.insert(h, rec);
+        }
+        let mut out = Vec::new();
+        let mut cursor = tip;
+        loop {
+            out.push(cursor);
+            let rec = map
+                .get(&cursor)
+                .ok_or_else(|| "missing index".to_string())?;
+            if rec.prev == Hash32::zero() {
+                break;
+            }
+            cursor = rec.prev;
+        }
+        Ok(out)
+    }
+
+    pub fn missing_blocks_on_chain(&self, chain: &[Hash32]) -> Result<Vec<Hash32>, String> {
+        let mut missing = Vec::new();
+        for h in chain {
+            if !self.has_block(h)? {
+                missing.push(*h);
+            }
+        }
+        Ok(missing)
+    }
+
+    pub fn store_block_if_index_matches(&self, block: &Block) -> Result<(), String> {
+        let hash = block_hash(block);
+        let idx = self
+            .get_index(&hash)?
+            .ok_or_else(|| "index missing for block".to_string())?;
+        let header = &block.header;
+        if header.prev != idx.prev
+            || header.bits != idx.bits
+            || header.timestamp != idx.timestamp
+        {
+            return Err("block header does not match index".into());
+        }
+        self.blocks
+            .insert(hash.as_bytes(), to_vec(block).map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
+        Ok(())
     }
 
     #[cfg(test)]

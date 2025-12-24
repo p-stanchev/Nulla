@@ -62,6 +62,15 @@ cargo run -p nulla-node
 
 ---
 
+## Testnet
+
+- Two nodes: use the run examples above; expose `--listen 0.0.0.0:18444` on at least one node so others can dial.
+- Connecting peers: pass `--peers ip:port,...` (or `NULLA_PEERS`) to seed connections.
+- Mining (solo, devnet loop): run `cargo run -p nulla-node` to produce deterministic blocks; PoW remains consensus-valid (dev-pow is test-only).
+- Known limitations: no wallet yet, no UI, no explorers, no Stratum; focus is on sync/restart correctness and fork handling.
+
+---
+
 ## Testing
 
 ```bash

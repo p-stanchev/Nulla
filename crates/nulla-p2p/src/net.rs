@@ -605,7 +605,11 @@ impl P2pEngine {
         })
     }
 
-    pub fn connect_and_sync(engine: Arc<Mutex<P2pEngine>>, addr: SocketAddr) -> Result<thread::JoinHandle<()>, P2pError> {
+    pub fn connect_and_sync(
+        engine: Arc<Mutex<P2pEngine>>,
+        addr: SocketAddr,
+        initial_getblocks: Vec<Hash32>,
+    ) -> Result<thread::JoinHandle<()>, P2pError> {
         let mut stream = TcpStream::connect(addr).map_err(|e| P2pError::Io(e.to_string()))?;
         stream
             .set_nodelay(true)
@@ -627,6 +631,9 @@ impl P2pEngine {
                 stop: None,
             },
         )?;
+        for h in &initial_getblocks {
+            let _ = P2pEngine::write_message(&mut stream, &Message::GetBlock(*h));
+        }
 
         let eng = Arc::clone(&engine);
         let handle = thread::spawn(move || {

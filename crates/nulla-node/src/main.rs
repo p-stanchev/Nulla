@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use chain_store::ChainStore;
+use chain_store::{ChainDb, ChainStore};
 #[allow(unused_imports)]
 use nulla_consensus::validate_block_with_prev_bits;
 use nulla_core::{
@@ -54,13 +54,13 @@ fn main() {
     let cfg = resolve_config(Config::parse());
 
     // -----------------
-    // Genesis block (height 0)
+    // Genesis block (height 0) and DB setup
     // -----------------
     let genesis = build_genesis();
     let genesis_header = genesis.header.clone();
     let db_path = cfg.db_path.clone();
-    let chain = ChainStore::load_or_init(&db_path, genesis.clone()).expect("valid genesis/db");
-    let chain = Arc::new(Mutex::new(chain));
+    let chain_db = Arc::new(ChainDb::open(&db_path).expect("open chain db"));
+    chain_db.ensure_genesis(&genesis).expect("insert genesis");
 
     // -----------------
     // P2P wiring (authoritative ingress)
@@ -75,8 +75,28 @@ fn main() {
     )
     .expect("p2p init");
     {
+        let db = Arc::clone(&chain_db);
+        p2p.set_block_callback(move |block| db.store_block_if_index_matches(block));
+    }
+    let p2p = Arc::new(Mutex::new(p2p));
+
+    let listener = TcpListener::bind(cfg.listen).expect("bind p2p socket");
+    let _server = P2pEngine::serve_incoming(Arc::clone(&p2p), listener);
+
+    // Compute best chain and missing bodies, then request them on connect.
+    let (_best_tip, best_chain, missing) = compute_best_chain_and_missing(&chain_db);
+    for peer in cfg.peers {
+        let _ = P2pEngine::connect_and_sync(Arc::clone(&p2p), peer, missing.clone());
+    }
+    // Poll for missing bodies to arrive.
+    wait_for_missing(&chain_db, &best_chain, Duration::from_secs(2));
+
+    // Build ChainStore once bodies are reconciled.
+    let chain = ChainStore::load_or_init(&db_path, genesis.clone()).expect("valid genesis/db");
+    let chain = Arc::new(Mutex::new(chain));
+    {
         let chain_for_cb = Arc::clone(&chain);
-        p2p.set_block_callback(move |block| {
+        p2p.lock().expect("p2p").set_block_callback(move |block| {
             let mut chain = chain_for_cb.lock().expect("chain lock");
             let h = block_hash(block);
             if chain.entry(&h).is_none() {
@@ -84,14 +104,6 @@ fn main() {
             }
             Ok(())
         });
-    }
-    let p2p = Arc::new(Mutex::new(p2p));
-
-    let listener = TcpListener::bind(cfg.listen).expect("bind p2p socket");
-    let _server = P2pEngine::serve_incoming(Arc::clone(&p2p), listener);
-
-    for peer in cfg.peers {
-        let _ = P2pEngine::connect_and_sync(Arc::clone(&p2p), peer);
     }
 
     // -----------------
@@ -371,6 +383,27 @@ struct ResolvedConfig {
     db_path: PathBuf,
     p2p_db_path: PathBuf,
     reorg_cap: u64,
+}
+
+fn compute_best_chain_and_missing(db: &ChainDb) -> (Hash32, Vec<Hash32>, Vec<Hash32>) {
+    let best = db
+        .best_tip_by_work()
+        .expect("best tip lookup")
+        .unwrap_or_else(|| Hash32::from(GENESIS_HASH_BYTES));
+    let chain = db.chain_from_tip(best).expect("chain walk");
+    let missing = db.missing_blocks_on_chain(&chain).expect("missing check");
+    (best, chain, missing)
+}
+
+fn wait_for_missing(db: &ChainDb, chain: &[Hash32], timeout: Duration) {
+    let start = std::time::Instant::now();
+    loop {
+        let missing = db.missing_blocks_on_chain(chain).unwrap_or_default();
+        if missing.is_empty() || start.elapsed() >= timeout {
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
 }
 
 #[cfg(test)]
