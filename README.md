@@ -45,9 +45,9 @@ Each crate owns a single responsibility; there are no circular dependencies.
 ## Run
 
 Env:
-- `NULLA_LISTEN` (default `127.0.0.1:18444`)
-- `NULLA_PEERS` (comma-separated `host:port` list to dial)
-- Chain DBs live in the working directory: `nulla.chain.db`, `nulla.p2p.db`
+- CLI flags (primary): `--listen` (default `0.0.0.0:18444`), `--peers`, `--db` (default `./nulla.chain.db`), `--reorg-cap` (default `100`, policy-only).
+- Env fallbacks: `NULLA_LISTEN`, `NULLA_PEERS`, `NULLA_DB`, `NULLA_REORG_CAP`. Resolution order: flag → env → default.
+- Chain DBs live in the working directory by default: `nulla.chain.db`, plus `nulla.p2p.db` for P2P metadata.
 
 Examples (two local nodes):
 ```bash

@@ -15,6 +15,7 @@ time = "0.3"
 num-bigint = "0.4"
 sled = "0.34"
 borsh = "1.5"
+clap = { version = "4.5", features = ["derive"] }
 
 [features]
 default = []

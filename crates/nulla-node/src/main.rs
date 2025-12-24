@@ -4,6 +4,7 @@
 
 mod chain_store;
 
+use clap::Parser;
 use std::env;
 use std::net::{SocketAddr, TcpListener};
 use std::path::PathBuf;
@@ -20,10 +21,28 @@ use nulla_core::{
     GENESIS_TIMESTAMP, NETWORK_MAGIC, PROTOCOL_VERSION,
 };
 use nulla_state::{block_subsidy, LedgerState};
-use nulla_p2p::net::{Message, P2pEngine};
+use nulla_p2p::net::{Message, P2pEngine, Policy};
 
 /// Extremely easy difficulty for devnet.
 const DEVNET_BITS: u32 = GENESIS_BITS;
+
+/// Node configuration resolved from CLI/env/defaults.
+#[derive(Parser, Debug)]
+#[command(name = "nulla-node", version)]
+struct Config {
+    /// Listen address for P2P
+    #[arg(long = "listen")]
+    listen: Option<String>,
+    /// Peers to dial, comma separated host:port list
+    #[arg(long = "peers")]
+    peers: Option<String>,
+    /// Path to ChainDB (sled)
+    #[arg(long = "db")]
+    db: Option<PathBuf>,
+    /// Policy reorg cap (non-consensus)
+    #[arg(long = "reorg-cap")]
+    reorg_cap: Option<u64>,
+}
 
 fn main() {
     println!("Starting Nulla minimal miner");
@@ -32,20 +51,29 @@ fn main() {
         NETWORK_MAGIC, ADDRESS_PREFIX
     );
 
+    let cfg = resolve_config(Config::parse());
+
     // -----------------
     // Genesis block (height 0)
     // -----------------
     let genesis = build_genesis();
     let genesis_header = genesis.header.clone();
-    let db_path = PathBuf::from("nulla.chain.db");
+    let db_path = cfg.db_path.clone();
     let chain = ChainStore::load_or_init(&db_path, genesis.clone()).expect("valid genesis/db");
     let chain = Arc::new(Mutex::new(chain));
 
     // -----------------
     // P2P wiring (authoritative ingress)
     // -----------------
-    let p2p_path = PathBuf::from("nulla.p2p.db");
-    let mut p2p = P2pEngine::new(&p2p_path, genesis_header).expect("p2p init");
+    let mut p2p = P2pEngine::with_policy(
+        &cfg.p2p_db_path,
+        genesis_header,
+        Policy {
+            max_reorg_depth: Some(cfg.reorg_cap),
+            ban_threshold: 3,
+        },
+    )
+    .expect("p2p init");
     {
         let chain_for_cb = Arc::clone(&chain);
         p2p.set_block_callback(move |block| {
@@ -59,19 +87,11 @@ fn main() {
     }
     let p2p = Arc::new(Mutex::new(p2p));
 
-    let listen_addr: SocketAddr = env::var("NULLA_LISTEN")
-        .unwrap_or_else(|_| "127.0.0.1:18444".to_string())
-        .parse()
-        .expect("valid listen address");
-    let listener = TcpListener::bind(listen_addr).expect("bind p2p socket");
+    let listener = TcpListener::bind(cfg.listen).expect("bind p2p socket");
     let _server = P2pEngine::serve_incoming(Arc::clone(&p2p), listener);
 
-    if let Ok(peers) = env::var("NULLA_PEERS") {
-        for peer in peers.split(',').filter(|s| !s.is_empty()) {
-            if let Ok(addr) = peer.parse::<SocketAddr>() {
-                let _ = P2pEngine::connect_and_sync(Arc::clone(&p2p), addr);
-            }
-        }
+    for peer in cfg.peers {
+        let _ = P2pEngine::connect_and_sync(Arc::clone(&p2p), peer);
     }
 
     // -----------------
@@ -304,6 +324,53 @@ fn xor_hash(a: Hash32, b: Hash32) -> Hash32 {
         out[i] = a.as_bytes()[i] ^ b.as_bytes()[i];
     }
     Hash32(out)
+}
+
+fn resolve_config(cli: Config) -> ResolvedConfig {
+    let listen = cli
+        .listen
+        .or_else(|| env::var("NULLA_LISTEN").ok())
+        .unwrap_or_else(|| "0.0.0.0:18444".to_string())
+        .parse()
+        .expect("invalid listen address");
+
+    let peers_raw = cli
+        .peers
+        .or_else(|| env::var("NULLA_PEERS").ok())
+        .unwrap_or_default();
+    let peers = peers_raw
+        .split(',')
+        .filter(|s| !s.trim().is_empty())
+        .filter_map(|s| s.trim().parse().ok())
+        .collect::<Vec<_>>();
+
+    let db_path = cli
+        .db
+        .or_else(|| env::var("NULLA_DB").ok().map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("nulla.chain.db"));
+    let mut p2p_db_path = db_path.clone();
+    p2p_db_path.set_extension("p2p.db");
+
+    let reorg_cap = cli
+        .reorg_cap
+        .or_else(|| env::var("NULLA_REORG_CAP").ok().and_then(|v| v.parse().ok()))
+        .unwrap_or(100);
+
+    ResolvedConfig {
+        listen,
+        peers,
+        db_path,
+        p2p_db_path,
+        reorg_cap,
+    }
+}
+
+struct ResolvedConfig {
+    listen: SocketAddr,
+    peers: Vec<SocketAddr>,
+    db_path: PathBuf,
+    p2p_db_path: PathBuf,
+    reorg_cap: u64,
 }
 
 #[cfg(test)]

@@ -377,7 +377,7 @@ pub struct Policy {
 impl Default for Policy {
     fn default() -> Self {
         Self {
-            max_reorg_depth: Some(1000),
+            max_reorg_depth: Some(100),
             ban_threshold: 3,
         }
     }
@@ -410,6 +410,10 @@ impl P2pEngine {
             policy,
             on_block: None,
         })
+    }
+
+    pub fn set_policy(&mut self, policy: Policy) {
+        self.policy = policy;
     }
 
     pub fn best_hash(&self) -> Hash32 {
