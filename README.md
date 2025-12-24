@@ -1,95 +1,78 @@
 # Nulla
 
-**Nulla** is an experimental, privacy-focused Proof-of-Work blockchain built from scratch in Rust.
+Nulla is an experimental, privacy-first Proof-of-Work blockchain built from scratch in Rust. It targets private-by-default UTXOs (commitments + nullifiers), deterministic consensus rules, and long-term security via tail emission.
 
-The project is designed with:
-- private-by-default UTXOs (commitments + nullifiers)
-- deterministic consensus rules
-- long-term security via **tail emission**
-- clean separation between core protocol, consensus, state, and node logic
-
-> ⚠️ Status: **early development / devnet prototype**  
-> No mainnet, no wallets, no networking yet.
+**Status:** early development / devnet prototype. There is no mainnet, wallet, mempool, or networking yet.
 
 ---
 
-## ✨ Features (current)
+## Current Capabilities
 
-- **Proof of Work**
-  - Canonical BLAKE3-based PoW (v0)
-  - Bitcoin-style compact difficulty (`bits`)
-- **Ledger State**
-  - Append-only commitment Merkle tree
-  - Nullifier set to prevent double-spends
-- **Tokenomics**
-  - Tail emission model (Monero-style)
-  - Deterministic block subsidy enforced by consensus
-- **Strict Consensus Enforcement**
-  - Exactly one coinbase per block
-  - Subsidy + fee claims verified in state
-- **Minimal Miner**
-  - Single-node devnet miner
-  - Deterministic block production
+- **Proof of Work:** BLAKE3-based PoW (v0) with Bitcoin-style compact difficulty targets.
+- **Ledger State:** Append-only commitment Merkle tree plus a nullifier set to prevent double-spends.
+- **Tokenomics:** Deterministic block subsidy with Monero-style tail emission for persistent miner incentives.
+- **Consensus Checks:** Enforces exactly one coinbase per block and validates claimed subsidy/fees against state.
+- **Node:** Minimal, single-node devnet miner that deterministically produces blocks (no mempool or network).
 
 ---
 
-## 🧱 Project Structure
+## Project Layout
 
-crates/
-├── nulla-core # Protocol types, hashing, serialization
-├── nulla-consensus # PoW, difficulty, header validation
-├── nulla-state # Commitment tree, nullifier set, state transitions
-└── nulla-node # Minimal node + miner (single-node devnet)
+- `crates/nulla-core` — canonical protocol types, hashing, serialization.
+- `crates/nulla-consensus` — PoW validation, compact difficulty, header validation.
+- `crates/nulla-state` — commitment tree, nullifier set, and state transitions.
+- `crates/nulla-node` — minimal node + devnet miner.
+- `crates/nulla-p2p`, `crates/nulla-zk`, `crates/nulla-wallet` — placeholders for upcoming networking, zk verification, and wallet support.
 
-yaml
-Copy code
-
-Each crate has a **single responsibility** and no circular dependencies.
+Each crate owns a single responsibility; there are no circular dependencies.
 
 ---
 
-## 🪙 Emission Schedule (v1)
+## Emission Schedule (v1)
 
-- Block time: **60 seconds**
-- Initial subsidy: **8 NULLA**
-- Halving every ~4 years
-- Tail emission: **0.1 NULLA / block forever**
-
-This ensures long-term miner incentives without relying on fees alone.
+- Block time: 60 seconds
+- Initial subsidy: 8 NULLA
+- Halving every ~4 years (2,102,400 blocks)
+- Tail emission: 0.1 NULLA per block indefinitely
 
 ---
 
-## ▶️ Running the Devnet Miner
+## Run the Devnet Miner
 
 ### Requirements
 - Rust 1.75+ (stable)
-- Linux / macOS / WSL recommended
+- Linux, macOS, or WSL recommended
 
-### Build & run
+### Build and run
 
 ```bash
 cargo run -p nulla-node
-You should see output like:
-
-bash
-Copy code
-Starting Nulla minimal miner…
-Block    0 | hash=… | commitments=1 | subsidy=800000000 | fees=0
-Block    1 | hash=… | commitments=2 | subsidy=800000000 | fees=0
-Block    2 | hash=… | commitments=3 | subsidy=800000000 | fees=0
 ```
 
-## 🛣️ Roadmap
+Expected output (hashes will differ):
 
-### Planned next steps (in order):
-- Mempool + regular transactions
-- Persistent storage
-- RPC interface
-- P2P networking
-- zk proof integration (fully private amounts)
-- KAWPOW PoW fork (GPU-oriented)
+```
+Starting Nulla minimal miner
+Block    0 | hash=... | commitments=1 | subsidy=800000000 | fees=0
+Block    1 | hash=... | commitments=2 | subsidy=800000000 | fees=0
+Block    2 | hash=... | commitments=3 | subsidy=800000000 | fees=0
+```
 
-## ⚠️ Disclaimer
+Blocks are produced deterministically about once per second in this devnet loop.
 
-This code is experimental and not audited.
-Do not use it for real funds.
+---
+
+## Roadmap (next steps)
+
+1) Mempool and regular transactions  
+2) Persistent storage  
+3) RPC interface  
+4) P2P networking  
+5) zk proof integration (private amounts)  
+6) KAWPOW PoW fork (GPU-oriented)
+
+---
+
+## Disclaimer
+
+This code is experimental and not audited. Do not use it for real funds.
