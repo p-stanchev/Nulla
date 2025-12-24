@@ -1,18 +1,31 @@
+<p align="center">
+  <img src="assets/nulla-256.png" alt="Nulla logo" width="140">
+</p>
+
 # Nulla
 
 Nulla is a privacy-first Proof-of-Work blockchain written in Rust. It targets private-by-default UTXOs (commitments + nullifiers), deterministic consensus rules, and long-term security via tail emission.
 
-**Status:** consensus is locked (MTP, difficulty clamp, PoW vectors, genesis), persistence is live (sled-backed ChainDB), and header-first P2P v0 exists with heaviest-work fork choice. Wallets and rich CLI are intentionally deferred.
+---
+
+## Status
+
+- Consensus locked: genesis, tail emission v1, MTP(11) + ±2h drift, difficulty clamp, PoW vectors.
+- Persisted ChainStore: sled-backed headers/blocks/index + best tip, restart-safe.
+- P2P v0: TCP, version/verack, ping/pong, getheaders/headers, header-first heaviest-work selection.
+- Block download: best-chain-only path with strict header↔block checks scaffolded.
+- Policy layer: reorg depth cap, peer scoring/bans, basic rate limits (non-consensus).
+- Wallet: out of scope until testnet sync is stable.
 
 ---
 
 ## What Works Today
 
-- **Consensus:** BLAKE3-based PoW (v0), compact difficulty, median-time-past(11) with ±2h drift guard, deterministic rewards with tail emission, hardcoded genesis, and golden PoW serialization vectors across multiple heights.
-- **ChainStore / ChainDB:** sled-backed storage for headers, blocks, index entries `{hash,height,prev,bits,time,cumulative_work}`, and best tip. Restart-safe with recovery coverage.
-- **Fork Choice:** heaviest cumulative work with deterministic tie-breaker; difficulty-drop clamp enforced on every acceptance path; single validation entrypoint (no bypass routes).
-- **P2P v0 (header-first):** version/verack, ping/pong, getheaders/headers, locators, fork handling, and restart safety. Dev-only easy PoW lives behind the `dev-pow` feature for tests and vector generation.
-- **Node:** minimal devnet loop and ChainStore integration. Wiring `P2pEngine` as the sole ingress and adding block downloads for the best chain are the next milestones.
+- **Consensus:** BLAKE3-based PoW (v0), compact difficulty, median-time-past(11), tail emission, hardcoded genesis, multi-height PoW serialization vectors.
+- **ChainStore / ChainDB:** sled-backed storage for headers, blocks, index entries `{hash,height,prev,bits,time,cumulative_work}`, and best tip with recovery coverage.
+- **Fork Choice:** heaviest cumulative work with deterministic tie-breaker; difficulty-drop clamp enforced everywhere; single validation entrypoint (no bypass).
+- **P2P v0 (header-first):** TCP transport, locators, fork handling, restart safety. Dev-only easy PoW lives behind the `dev-pow` feature for tests/vector generation.
+- **Node:** devnet miner loop wired through ChainStore and P2pEngine; block download restricted to the best chain.
 
 ---
 
@@ -22,41 +35,49 @@ Nulla is a privacy-first Proof-of-Work blockchain written in Rust. It targets pr
 - `crates/nulla-consensus` — PoW, difficulty, header/block validation.
 - `crates/nulla-state` — commitment tree, nullifier set, state transitions.
 - `crates/nulla-node` — node runtime, ChainStore integration, devnet loop.
-- `crates/nulla-p2p` — header-first networking engine (messages, locators, fork handling).
+- `crates/nulla-p2p` — networking engine (TCP header-first, locators, fork handling).
 - `crates/nulla-wallet`, `crates/nulla-zk` — stubs for future wallet and zk work.
 
 Each crate owns a single responsibility; there are no circular dependencies.
 
 ---
 
-## Running and Testing
+## Run
 
-Prereqs: Rust stable (1.75+). Linux/macOS/WSL recommended.
+Env:
+- `NULLA_LISTEN` (default `127.0.0.1:18444`)
+- `NULLA_PEERS` (comma-separated `host:port` list to dial)
+- Chain DBs live in the working directory: `nulla.chain.db`, `nulla.p2p.db`
 
-- Run the node (devnet loop + sled ChainDB in the working directory):
-  ```bash
-  cargo run -p nulla-node
-  ```
-- Full test suite:
-  ```bash
-  cargo test --workspace
-  ```
-- P2P and vector tests with the dev-only easy PoW switch:
-  ```bash
-  cargo test --features dev-pow --package nulla-p2p
-  cargo test --features dev-pow --package nulla-node
-  ```
+Examples (two local nodes):
+```bash
+# Node A (listen on default)
+cargo run -p nulla-node
+
+# Node B (custom port, connect to A)
+NULLA_LISTEN=127.0.0.1:18445 \
+NULLA_PEERS=127.0.0.1:18444 \
+cargo run -p nulla-node
+```
+
+---
+
+## Testing
+
+```bash
+cargo test --workspace
+cargo test --workspace --features dev-pow
+```
+
 `dev-pow` is strictly for testing/vector generation and is not consensus.
 
 ---
 
-## Near-Term Plan (strict order)
+## Roadmap (next)
 
-1) Wire `P2pEngine` into the node so all inbound headers flow through the single validation entrypoint and ChainDB; avoid ad-hoc networking paths.
-2) Add block download for the best chain only (`getblock`/`block`), with strict header↔block consistency checks; persist bodies via ChainDB.
-3) Add a small policy layer (non-consensus): default max reorg depth, peer ban/score, basic rate limits.
-4) Freeze testnet params and tag `v0.1.0-testnet` once block sync is stable.
-5) Wallet CLI after the above (keygen, address encoding, scan/send), not before.
+1) Finalize block sync persistence across restarts (headers + bodies).
+2) Tag `v0.1.0-testnet` once block sync is stable.
+3) Only then start wallet CLI work (keygen, address encoding, scan/send).
 
 ---
 
