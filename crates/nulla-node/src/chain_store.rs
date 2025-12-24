@@ -33,6 +33,17 @@ pub struct ChainDb {
     meta: sled::Tree,
 }
 
+impl Clone for ChainDb {
+    fn clone(&self) -> Self {
+        Self {
+            db: self.db.clone(),
+            blocks: self.blocks.clone(),
+            index: self.index.clone(),
+            meta: self.meta.clone(),
+        }
+    }
+}
+
 #[allow(dead_code)]
 impl ChainDb {
     pub fn open(path: &Path) -> Result<Self, String> {
@@ -212,9 +223,13 @@ pub struct ChainEntry {
 }
 
 impl ChainStore {
+    #[allow(dead_code)]
     pub fn load_or_init(path: &Path, genesis: Block) -> Result<Self, String> {
         let db = ChainDb::open(path)?;
+        Self::load_or_init_with_db(db, genesis)
+    }
 
+    pub fn load_or_init_with_db(db: ChainDb, genesis: Block) -> Result<Self, String> {
         let genesis_hash = hash32_from_bytes(&GENESIS_HASH_BYTES);
         if block_hash(&genesis) != genesis_hash {
             return Err("genesis hash mismatch".into());

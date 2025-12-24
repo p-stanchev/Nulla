@@ -92,7 +92,7 @@ fn main() {
     wait_for_missing(&chain_db, &best_chain, Duration::from_secs(2));
 
     // Build ChainStore once bodies are reconciled.
-    let chain = ChainStore::load_or_init(&db_path, genesis.clone()).expect("valid genesis/db");
+    let chain = ChainStore::load_or_init_with_db((*chain_db).clone(), genesis.clone()).expect("valid genesis/db");
     let chain = Arc::new(Mutex::new(chain));
     {
         let chain_for_cb = Arc::clone(&chain);
