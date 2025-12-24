@@ -282,11 +282,6 @@ impl ChainStore {
         self.entries.get(hash)
     }
 
-    #[cfg(test)]
-    pub fn db(&self) -> &ChainDb {
-        &self.db
-    }
-
     pub fn median_time_past(&self, prev: Hash32) -> Option<u64> {
         let mut ts = Vec::new();
         let mut cursor = prev;
@@ -400,15 +395,21 @@ fn hash32_from_bytes(bytes: &[u8; 32]) -> Hash32 {
 }
 
 #[cfg(test)]
+#[allow(unused_imports)]
 mod tests {
+    #[cfg(feature = "dev-pow")]
     use super::*;
+    #[cfg(feature = "dev-pow")]
     use crate::xor_hash;
+    #[cfg(feature = "dev-pow")]
     use nulla_core::{
         txid, Amount, BlockHeader, Commitment, Transaction, TransactionKind, GENESIS_BITS,
         GENESIS_NONCE, GENESIS_TIMESTAMP, PROTOCOL_VERSION,
     };
+    #[cfg(feature = "dev-pow")]
     use tempfile::tempdir;
 
+    #[cfg(feature = "dev-pow")]
     fn coinbase_tx(height: u64, subsidy: Amount) -> Transaction {
         Transaction {
             version: PROTOCOL_VERSION,
@@ -424,12 +425,14 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "dev-pow")]
     fn coinbase_commitment(height: u64) -> Commitment {
         let mut bytes = [0u8; 32];
         bytes[8..16].copy_from_slice(&height.to_le_bytes());
         Commitment(bytes)
     }
 
+    #[cfg(feature = "dev-pow")]
     fn tx_merkle_root(txs: &[Transaction]) -> Hash32 {
         if txs.is_empty() {
             return Hash32::zero();
@@ -442,6 +445,7 @@ mod tests {
         acc
     }
 
+    #[cfg(feature = "dev-pow")]
     fn make_genesis() -> Block {
         let txs = vec![coinbase_tx(0, Amount::from_atoms(800_000_000))];
         let state = LedgerState::new();
@@ -458,6 +462,7 @@ mod tests {
         Block { header, txs }
     }
 
+    #[cfg(feature = "dev-pow")]
     fn build_block(chain: &ChainStore, height: u64, bits: u32) -> Block {
         let prev = chain.best_hash();
         let prev_entry = chain.entry(&prev).unwrap();
