@@ -359,7 +359,7 @@ mod tests {
 
     fn make_genesis() -> Block {
         let txs = vec![coinbase_tx(0, Amount::from_atoms(800_000_000))];
-        let mut state = LedgerState::new();
+        let state = LedgerState::new();
         let commitment_root = state.preview_root_after(&txs).expect("preview");
         let header = BlockHeader {
             version: PROTOCOL_VERSION,

@@ -9,6 +9,7 @@ description = "Nulla node (v0) – minimal single-node miner."
 nulla-core = { path = "../nulla-core" }
 nulla-consensus = { path = "../nulla-consensus" }
 nulla-state = { path = "../nulla-state" }
+nulla-p2p = { path = "../nulla-p2p" }
 
 time = "0.3"
 num-bigint = "0.4"

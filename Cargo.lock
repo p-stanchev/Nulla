@@ -344,6 +344,7 @@ dependencies = [
  "hex",
  "nulla-consensus",
  "nulla-core",
+ "nulla-p2p",
  "nulla-state",
  "num-bigint",
  "serde_json",

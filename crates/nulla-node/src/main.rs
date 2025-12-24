@@ -4,9 +4,12 @@
 
 mod chain_store;
 
+use std::env;
+use std::net::{SocketAddr, TcpListener};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
-use std::path::PathBuf;
 
 use chain_store::ChainStore;
 #[allow(unused_imports)]
@@ -17,6 +20,7 @@ use nulla_core::{
     GENESIS_TIMESTAMP, NETWORK_MAGIC, PROTOCOL_VERSION,
 };
 use nulla_state::{block_subsidy, LedgerState};
+use nulla_p2p::net::{Message, P2pEngine};
 
 /// Extremely easy difficulty for devnet.
 const DEVNET_BITS: u32 = GENESIS_BITS;
@@ -32,8 +36,43 @@ fn main() {
     // Genesis block (height 0)
     // -----------------
     let genesis = build_genesis();
+    let genesis_header = genesis.header.clone();
     let db_path = PathBuf::from("nulla.chain.db");
-    let mut chain = ChainStore::load_or_init(&db_path, genesis.clone()).expect("valid genesis/db");
+    let chain = ChainStore::load_or_init(&db_path, genesis.clone()).expect("valid genesis/db");
+    let chain = Arc::new(Mutex::new(chain));
+
+    // -----------------
+    // P2P wiring (authoritative ingress)
+    // -----------------
+    let p2p_path = PathBuf::from("nulla.p2p.db");
+    let mut p2p = P2pEngine::new(&p2p_path, genesis_header).expect("p2p init");
+    {
+        let chain_for_cb = Arc::clone(&chain);
+        p2p.set_block_callback(move |block| {
+            let mut chain = chain_for_cb.lock().expect("chain lock");
+            let h = block_hash(block);
+            if chain.entry(&h).is_none() {
+                chain.insert_block(block.clone()).map_err(|e| e)?;
+            }
+            Ok(())
+        });
+    }
+    let p2p = Arc::new(Mutex::new(p2p));
+
+    let listen_addr: SocketAddr = env::var("NULLA_LISTEN")
+        .unwrap_or_else(|_| "127.0.0.1:18444".to_string())
+        .parse()
+        .expect("valid listen address");
+    let listener = TcpListener::bind(listen_addr).expect("bind p2p socket");
+    let _server = P2pEngine::serve_incoming(Arc::clone(&p2p), listener);
+
+    if let Ok(peers) = env::var("NULLA_PEERS") {
+        for peer in peers.split(',').filter(|s| !s.is_empty()) {
+            if let Ok(addr) = peer.parse::<SocketAddr>() {
+                let _ = P2pEngine::connect_and_sync(Arc::clone(&p2p), addr);
+            }
+        }
+    }
 
     // -----------------
     // Main mining loop
@@ -44,26 +83,42 @@ fn main() {
         let subsidy = block_subsidy(height);
 
         let coinbase = coinbase_tx(height, fees, subsidy);
-        let prev = chain.best_hash();
-        let prev_bits = chain.best_bits();
-        let mtp = chain
-            .median_time_past(prev)
-            .expect("mtp available for non-genesis");
+        let (block_for_p2p, state_commitments, best_height, best_hash) = {
+            let mut chain_lock = chain.lock().expect("chain lock");
+            let prev = chain_lock.best_hash();
+            let prev_bits = chain_lock.best_bits();
+            let mtp = chain_lock
+                .median_time_past(prev)
+                .expect("mtp available for non-genesis");
 
-        let block = build_block(prev, prev_bits, mtp, &chain, vec![coinbase], DEVNET_BITS);
+            let block = build_block(prev, prev_bits, mtp, &chain_lock, vec![coinbase], DEVNET_BITS);
+            let block_for_store = block.clone();
 
-        chain
-            .insert_block(block)
-            .expect("block must validate and attach");
-        let state = chain.rebuild_state();
+            chain_lock.insert_block(block).expect("block must validate and attach");
+            let state = chain_lock.rebuild_state();
+            let best = chain_lock.best_entry();
 
-        let best = chain.best_entry();
+            (
+                block_for_store,
+                state.commitment_len(),
+                best.height,
+                chain_lock.best_hash(),
+            )
+        };
+
+        // Advertise to peers using the single entrypoint.
+        {
+            let mut p2p_guard = p2p.lock().expect("p2p");
+            let _ = p2p_guard.handle_message(0, Message::Headers(vec![block_for_p2p.header.clone()]));
+            let _ = p2p_guard.handle_message(0, Message::Block(block_for_p2p));
+        }
+
         println!(
             "Block {:>4} | hash={} | height={} | commitments={}",
-            best.height,
-            chain.best_hash(),
-            best.height,
-            state.commitment_len()
+            best_height,
+            best_hash,
+            best_height,
+            state_commitments
         );
 
         thread::sleep(Duration::from_secs(1));
