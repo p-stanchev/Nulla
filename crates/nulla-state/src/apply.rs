@@ -1,3 +1,4 @@
+// Consensus-critical. Changes require spec update + tests.
 //! State transition logic for Nulla v0.
 
 use nulla_core::{
@@ -183,8 +184,11 @@ fn commitment_to_leaf(cm: Commitment) -> Leaf {
     *cm.as_bytes()
 }
 
-/// Tail emission v1 block subsidy schedule.
-pub fn block_subsidy(height: u64) -> Amount {
+/// Pure block reward schedule (atoms) for tail emission v1.
+///
+/// Reward = max(INITIAL_SUBSIDY >> epoch, TAIL_EMISSION),
+/// where epoch = height / HALVING_INTERVAL_BLOCKS.
+pub fn block_reward_atoms(height: u64) -> u64 {
     let epochs = height / HALVING_INTERVAL_BLOCKS;
 
     // INITIAL_SUBSIDY_ATOMS / 2^epochs (capped when epochs is large).
@@ -200,5 +204,40 @@ pub fn block_subsidy(height: u64) -> Amount {
         shifted
     };
 
-    Amount::from_atoms(reward)
+    reward
+}
+
+/// Tail emission v1 block subsidy schedule expressed as an Amount wrapper.
+pub fn block_subsidy(height: u64) -> Amount {
+    Amount::from_atoms(block_reward_atoms(height))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const H_TAIL: u64 = 7 * HALVING_INTERVAL_BLOCKS;
+
+    #[test]
+    fn reward_genesis() {
+        assert_eq!(block_reward_atoms(0), INITIAL_SUBSIDY_ATOMS);
+    }
+
+    #[test]
+    fn reward_pre_tail_boundary() {
+        // Last block before tail kicks in (epoch 6).
+        let h = H_TAIL - 1;
+        assert_eq!(block_reward_atoms(h), INITIAL_SUBSIDY_ATOMS >> 6);
+    }
+
+    #[test]
+    fn reward_first_tail_block() {
+        assert_eq!(block_reward_atoms(H_TAIL), TAIL_EMISSION_ATOMS);
+    }
+
+    #[test]
+    fn reward_far_into_tail() {
+        let h = H_TAIL + 1_000_000;
+        assert_eq!(block_reward_atoms(h), TAIL_EMISSION_ATOMS);
+    }
 }

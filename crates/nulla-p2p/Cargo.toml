@@ -4,3 +4,15 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+nulla-consensus = { path = "../nulla-consensus" }
+nulla-core = { path = "../nulla-core" }
+sled = "0.34"
+borsh = "1.5"
+thiserror = "1.0"
+tempfile = "3.10"
+num-bigint = "0.4"
+hex-literal = "0.4"
+
+[features]
+default = []
+dev-pow = ["nulla-consensus/dev-pow"]

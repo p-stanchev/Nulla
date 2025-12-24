@@ -1,3 +1,4 @@
+// Consensus-critical. Changes require spec update + tests.
 //! Canonical protocol types for Nulla v0.
 //!
 //! This module defines all consensus-visible data structures and primitive

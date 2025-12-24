@@ -1,3 +1,4 @@
+// Consensus-critical. Changes require spec update + tests.
 //! Protocol-wide constants for Nulla v0.
 
 /// Protocol semantic version (v0).
@@ -51,6 +52,36 @@ pub const DS_COMMITMENT: &[u8] = b"NULLA::COMMITMENT::V0";
 ///
 /// Prevents cross-domain hash collisions.
 pub const DS_NULLIFIER: &[u8] = b"NULLA::NULLIFIER::V0";
+
+/// Chain identity string (devnet).
+pub const CHAIN_ID: &str = "nulla-devnet";
+
+/// Network magic bytes (devnet).
+pub const NETWORK_MAGIC: [u8; 4] = *b"NDVT";
+
+/// Address prefix (devnet placeholder; not yet used in wallet).
+pub const ADDRESS_PREFIX: u8 = 0x35;
+
+/// Genesis timestamp (Unix seconds, deterministic).
+pub const GENESIS_TIMESTAMP: u64 = 1_700_000_000;
+
+/// Genesis difficulty bits (devnet).
+pub const GENESIS_BITS: u32 = 0x207f_ffff;
+
+/// Genesis nonce (devnet).
+pub const GENESIS_NONCE: u64 = 2;
+
+/// Genesis block hash (devnet) as raw bytes (big-endian).
+pub const GENESIS_HASH_BYTES: [u8; HASH32_LEN] = [
+    0x12, 0xd1, 0x4d, 0x28, 0x4f, 0x38, 0xed, 0x0a, 0xdc, 0x35, 0x22, 0x4c, 0xc5, 0x13, 0x13,
+    0x01, 0xf5, 0x16, 0x7e, 0xf7, 0x1b, 0x1b, 0xa7, 0x11, 0xc1, 0x75, 0xbf, 0xaf, 0xf1, 0x9b,
+    0xe8, 0x7b,
+];
+
+/// Maximum per-block target increase (difficulty drop) ratio numerator.
+pub const MAX_TARGET_INCREASE_NUM: u32 = 125;
+/// Maximum per-block target increase (difficulty drop) ratio denominator.
+pub const MAX_TARGET_INCREASE_DEN: u32 = 100;
 
 /// Block time target in seconds (economic / UX target).
 pub const BLOCK_TIME_SECS: u64 = 60;

@@ -3,6 +3,7 @@
 #![deny(clippy::unwrap_used)]
 #![deny(clippy::expect_used)]
 
+// Consensus-critical. Changes require spec update + tests.
 //! Nulla consensus rules for PoW blocks (v0).
 //!
 //! This crate is responsible for:
@@ -15,9 +16,11 @@
 pub mod difficulty;
 pub mod error;
 pub mod pow;
+pub mod work;
 pub mod validate;
 
 pub use difficulty::*;
 pub use error::*;
 pub use pow::*;
+pub use work::*;
 pub use validate::*;

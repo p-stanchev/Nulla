@@ -1,3 +1,4 @@
+// Consensus-critical. Changes require spec update + tests.
 //! Canonical serialization helpers.
 //!
 //! Rule: all consensus-critical objects are encoded with Borsh.
