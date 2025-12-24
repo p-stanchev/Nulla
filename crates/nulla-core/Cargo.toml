@@ -1,0 +1,22 @@
+[package]
+name = "nulla-core"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Nulla core types, constants, hashing, and canonical serialization."
+
+[dependencies]
+borsh = { version = "1.5", features = ["derive"] }
+blake3 = "1.5"
+thiserror = "1.0"
+hex = "0.4"
+
+# Optional: serde support for JSON/RPC (kept behind a feature)
+serde = { version = "1.0", features = ["derive"], optional = true }
+
+[features]
+default = []
+serde = ["dep:serde"]
+
+[dev-dependencies]
+rand = "0.8"

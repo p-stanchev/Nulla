@@ -1,0 +1,11 @@
+[workspace]
+members = [
+  "crates/nulla-core",
+  "crates/nulla-state",
+  "crates/nulla-consensus",
+  "crates/nulla-p2p",
+  "crates/nulla-zk",
+  "crates/nulla-wallet",
+  "crates/nulla-node",
+]
+resolver = "2"

@@ -1,0 +1,21 @@
+[package]
+name = "nulla-state"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Nulla ledger state: commitment tree, nullifier set, and state transitions."
+
+[dependencies]
+nulla-core = { path = "../nulla-core" }
+thiserror = "1.0"
+borsh = { version = "1.6", features = ["derive"] }
+
+# Storage-friendly sets (fast, deterministic iteration not required)
+hashbrown = "0.14"
+
+# Optional serde passthrough (RPC/debug)
+serde = { version = "1.0", features = ["derive"], optional = true }
+
+[features]
+default = []
+serde = ["dep:serde", "nulla-core/serde"]
