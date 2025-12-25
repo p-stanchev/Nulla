@@ -117,6 +117,28 @@ impl ChainDb {
         Ok(())
     }
 
+    pub fn all_utxos(&self) -> Result<Vec<(OutPoint, UtxoRecord)>, String> {
+        let mut out = Vec::new();
+        for item in self.utxos.iter() {
+            let (k, v) = item.map_err(|e| e.to_string())?;
+            if k.len() != 36 {
+                continue;
+            }
+            let mut txid = [0u8; 32];
+            txid.copy_from_slice(&k[0..32]);
+            let mut vout_bytes = [0u8; 4];
+            vout_bytes.copy_from_slice(&k[32..36]);
+            let vout = u32::from_le_bytes(vout_bytes);
+            let op = OutPoint {
+                txid: Hash32(txid),
+                vout,
+            };
+            let rec = UtxoRecord::try_from_slice(&v).map_err(|e| e.to_string())?;
+            out.push((op, rec));
+        }
+        Ok(out)
+    }
+
     pub fn best_tip(&self) -> Result<Option<Hash32>, String> {
         if let Some(bytes) = self.meta.get(KEY_BEST).map_err(|e| e.to_string())? {
             let mut arr = [0u8; 32];

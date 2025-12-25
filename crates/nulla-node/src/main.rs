@@ -6,6 +6,7 @@ mod mempool;
 
 use clap::Parser;
 use std::env;
+use std::fs;
 use std::net::{SocketAddr, TcpListener};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -80,7 +81,7 @@ fn main() {
         p2p.set_block_callback(move |block| db.store_block_if_index_matches(block));
     }
     let p2p = Arc::new(Mutex::new(p2p));
-    let _mempool = Arc::new(Mutex::new(Mempool::new()));
+    let mempool = Arc::new(Mutex::new(Mempool::new()));
 
     let listener = TcpListener::bind(cfg.listen).expect("bind p2p socket");
     let _server = P2pEngine::serve_incoming(Arc::clone(&p2p), listener);
@@ -112,11 +113,23 @@ fn main() {
     // Main mining loop
     // -----------------
     for height in 1u64.. {
-        // v0 devnet: no mempool yet, only coinbase.
-        let fees = Amount::zero();
+        // Drain any locally submitted transactions (file dropbox).
+        drain_local_submissions(&cfg.db_path, &chain, &mempool);
+
+        // Gather txs from mempool (no ordering/limits yet).
+        let txs_from_pool = {
+            let pool = mempool.lock().expect("mempool");
+            pool.pending()
+        };
+        let fee_sum: Amount = txs_from_pool
+            .iter()
+            .fold(Amount::zero(), |acc, tx| acc.checked_add(tx.fee).unwrap_or(acc));
         let subsidy = block_subsidy(height);
 
-        let coinbase = coinbase_tx(height, fees, subsidy);
+        let coinbase = coinbase_tx(height, fee_sum, subsidy);
+        let mut txs = Vec::with_capacity(1 + txs_from_pool.len());
+        txs.push(coinbase);
+        txs.extend_from_slice(&txs_from_pool);
         let (block_for_p2p, state_commitments, best_height, best_hash) = {
             let mut chain_lock = chain.lock().expect("chain lock");
             let prev = chain_lock.best_hash();
@@ -125,7 +138,7 @@ fn main() {
                 .median_time_past(prev)
                 .expect("mtp available for non-genesis");
 
-            let block = build_block(prev, prev_bits, mtp, &chain_lock, vec![coinbase], DEVNET_BITS);
+            let block = build_block(prev, prev_bits, mtp, &chain_lock, txs, DEVNET_BITS);
             let block_for_store = block.clone();
 
             chain_lock.insert_block(block).expect("block must validate and attach");
@@ -337,6 +350,40 @@ fn submit_tx_to_node(
     let chain_guard = chain.lock().expect("chain lock");
     let mut pool = mempool.lock().expect("mempool lock");
     pool.submit_tx(&*chain_guard, tx)
+}
+
+fn drain_local_submissions(
+    db_path: &PathBuf,
+    chain: &Arc<Mutex<ChainStore>>,
+    mempool: &Arc<Mutex<Mempool>>,
+) {
+    let submit_dir = db_path.join("tx-submissions");
+    if let Err(e) = fs::create_dir_all(&submit_dir) {
+        eprintln!("warn: cannot create submission dir: {e}");
+        return;
+    }
+    let entries = match fs::read_dir(&submit_dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("tx") {
+            continue;
+        }
+        let bytes = match fs::read(&path) {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+        let tx: Transaction = match borsh::BorshDeserialize::try_from_slice(&bytes) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        let res = submit_tx_to_node(chain, mempool, tx);
+        if res.is_ok() {
+            let _ = fs::remove_file(&path);
+        }
+    }
 }
 
 /// Current UNIX time (seconds).

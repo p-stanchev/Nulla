@@ -151,6 +151,10 @@ impl Mempool {
         }
         self.remove_mined(&to_drop);
     }
+
+    pub fn pending(&self) -> Vec<Transaction> {
+        self.txs.values().cloned().collect()
+    }
 }
 
 // Placeholder until transparent UTXO tracking is wired into ChainStore.

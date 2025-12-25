@@ -6,12 +6,18 @@ use anyhow::{anyhow, Result};
 use argon2::{password_hash::SaltString, Argon2};
 use borsh::{BorshDeserialize, BorshSerialize};
 use blake3::Hasher;
-use bs58::encode as b58encode;
+use bs58::{decode as b58decode, encode as b58encode};
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use clap::{Parser, Subcommand};
-use k256::{ecdsa::SigningKey, EncodedPoint};
-use nulla_core::Hash32;
+use k256::{
+    ecdsa::{signature::Signer, SigningKey},
+    EncodedPoint,
+};
+use nulla_core::{
+    Amount, Hash32, OutPoint, Transaction, TransactionKind, TransparentInput, TransparentOutput,
+    PROTOCOL_VERSION, txid,
+};
 use nulla_node::chain_store::ChainDb;
 use rand_core::{OsRng, RngCore};
 use rpassword::prompt_password;
@@ -21,6 +27,7 @@ const TREE_KEYS: &str = "keys";
 const TREE_META: &str = "meta";
 const TREE_UTXOS: &str = "utxos";
 const ADDR_PREFIX: u8 = 0x35;
+
 fn argon2_params() -> Argon2<'static> {
     Argon2::default()
 }
@@ -45,6 +52,14 @@ enum Commands {
     },
     Balance,
     ListUtxos,
+    Send {
+        #[arg(long)]
+        to: String,
+        #[arg(long)]
+        amount: u64,
+        #[arg(long, default_value = "0")]
+        fee: u64,
+    },
     Rescan {
         #[arg(long)]
         from_height: Option<u64>,
@@ -194,24 +209,167 @@ impl Wallet {
             .best_tip_by_work()
             .map_err(|e| anyhow!(e))?
             .unwrap_or_else(|| Hash32::from([0u8; 32]));
-        let chain = chain_db
-            .chain_from_tip(best)
-            .map_err(|e| anyhow!(e))?;
-
         // Clear UTXOs for a full rescan.
         self.utxos().clear()?;
 
-        // Since transparent outputs aren’t implemented yet, we just advance the scan marker.
-        let new_height = chain.len().saturating_sub(1) as u64;
+        // Collect wallet pubkey hashes.
+        let mut pk_hashes = Vec::new();
+        for item in self.keys().iter() {
+            let (_, v) = item?;
+            let rec = KeyRecord::try_from_slice(&v)?;
+            let mut h = Hasher::new();
+            h.update(&rec.pubkey);
+            let mut h160 = [0u8; 20];
+            h.finalize_xof().fill(&mut h160);
+            pk_hashes.push((h160, rec.address));
+        }
+
+        let utxos = chain_db.all_utxos().map_err(|e| anyhow!(e))?;
+        let mut found = 0usize;
+        for (op, rec) in utxos {
+            if rec.height < start_height {
+                continue;
+            }
+            if let Some((_h, addr)) = pk_hashes.iter().find(|(h, _)| h == &rec.pubkey_hash) {
+                let wr = UtxoRecord {
+                    txid: op.txid,
+                    vout: op.vout,
+                    value: rec.value,
+                    height: rec.height,
+                    pubkey_hash: rec.pubkey_hash,
+                };
+                let key = format!("{}:{}", hex::encode(op.txid.as_bytes()), op.vout);
+                self.utxos().insert(key.as_bytes(), borsh::to_vec(&wr)?)?;
+                println!(
+                    "Found UTXO {}:{} value={} height={} addr={}",
+                    hex::encode(op.txid.as_bytes()),
+                    op.vout,
+                    rec.value,
+                    rec.height,
+                    addr
+                );
+                found += 1;
+            }
+        }
+
         let mut new_meta = meta;
-        new_meta.last_scanned_height = new_height.max(start_height);
+        new_meta.last_scanned_height = chain_db
+            .get_index(&best)
+            .ok()
+            .flatten()
+            .map(|i| i.height)
+            .unwrap_or(start_height);
         self.write_meta(&new_meta)?;
         println!(
-            "Rescan complete. Scanned heights {} -> {}. (No transparent outputs available yet.)",
-            start_height, new_meta.last_scanned_height
+            "Rescan complete. Scanned from height {}. UTXOs stored: {}",
+            start_height, found
         );
         Ok(())
     }
+
+    fn consume_utxos(
+        &self,
+        amount: u64,
+        fee: u64,
+        to_hash: [u8; 20],
+        change_hash: [u8; 20],
+        sk: &SigningKey,
+    ) -> Result<Transaction> {
+        let mut utxos = self.list_utxos()?;
+        utxos.sort_by_key(|u| std::cmp::Reverse(u.value));
+        let target = amount
+            .checked_add(fee)
+            .ok_or_else(|| anyhow!("amount overflow"))?;
+        let mut selected = Vec::new();
+        let mut total = 0u64;
+        for u in utxos {
+            total = total.checked_add(u.value).ok_or_else(|| anyhow!("overflow"))?;
+            selected.push(u);
+            if total >= target {
+                break;
+            }
+        }
+        if total < target {
+            return Err(anyhow!("insufficient funds"));
+        }
+
+        let mut inputs = Vec::new();
+        for u in &selected {
+            inputs.push(TransparentInput {
+                prevout: OutPoint {
+                    txid: u.txid,
+                    vout: u.vout,
+                },
+                sig: Vec::new(),
+                pubkey: Vec::new(),
+            });
+        }
+
+        let mut outputs = vec![TransparentOutput {
+            value: Amount::from_atoms(amount),
+            pubkey_hash: to_hash,
+        }];
+        let change = total - target;
+        if change > 0 {
+            outputs.push(TransparentOutput {
+                value: Amount::from_atoms(change),
+                pubkey_hash: change_hash,
+            });
+        }
+
+        let mut tx = Transaction {
+            version: PROTOCOL_VERSION,
+            kind: TransactionKind::Regular,
+            transparent_inputs: inputs,
+            transparent_outputs: outputs,
+            anchor_root: Hash32::zero(),
+            nullifiers: vec![],
+            outputs: vec![],
+            fee: Amount::from_atoms(fee),
+            claimed_subsidy: Amount::zero(),
+            claimed_fees: Amount::zero(),
+            proof: vec![],
+            memo: vec![],
+        };
+
+        for idx in 0..tx.transparent_inputs.len() {
+            let pubkey = EncodedPoint::from(sk.verifying_key()).as_bytes().to_vec();
+            let mut h = Hasher::new();
+            h.update(&pubkey);
+            let mut pk_hash = [0u8; 20];
+            h.finalize_xof().fill(&mut pk_hash);
+            let sighash = tx_sighash(&tx, idx, pk_hash);
+            let sig: k256::ecdsa::Signature = sk.sign(&sighash);
+            let inp = tx.transparent_inputs.get_mut(idx).expect("input exists");
+            inp.pubkey = pubkey;
+            inp.sig = sig.to_der().as_bytes().to_vec();
+        }
+
+        Ok(tx)
+    }
+}
+
+fn tx_sighash(tx: &Transaction, input_idx: usize, pk_hash: [u8; 20]) -> Vec<u8> {
+    let mut data = Vec::new();
+    data.extend_from_slice(&tx.version.to_le_bytes());
+    data.extend_from_slice(&(tx.transparent_inputs.len() as u64).to_le_bytes());
+    for (i, inp) in tx.transparent_inputs.iter().enumerate() {
+        data.extend_from_slice(inp.prevout.txid.as_bytes());
+        data.extend_from_slice(&inp.prevout.vout.to_le_bytes());
+        if i == input_idx {
+            data.extend_from_slice(&pk_hash);
+        } else {
+            data.extend_from_slice(&[0u8; 20]);
+        }
+    }
+    data.extend_from_slice(&(tx.transparent_outputs.len() as u64).to_le_bytes());
+    for o in &tx.transparent_outputs {
+        data.extend_from_slice(&o.value.atoms().to_le_bytes());
+        data.extend_from_slice(&o.pubkey_hash);
+    }
+    let mut h = Hasher::new();
+    h.update(&data);
+    h.finalize().as_bytes().to_vec()
 }
 
 fn encrypt_key(priv_bytes: &[u8], password: &str) -> Result<EncryptedKey> {
@@ -265,6 +423,25 @@ fn encode_address(pubkey: &[u8]) -> String {
     b58encode(payload).into_string()
 }
 
+fn decode_address(addr: &str) -> Result<[u8; 20]> {
+    let bytes = b58decode(addr).into_vec().map_err(|e| anyhow!(e))?;
+    if bytes.len() != 1 + 20 + 4 {
+        return Err(anyhow!("invalid address length"));
+    }
+    if bytes[0] != ADDR_PREFIX {
+        return Err(anyhow!("invalid address prefix"));
+    }
+    let (payload, checksum) = bytes.split_at(1 + 20);
+    let mut expected = [0u8; 4];
+    expected.copy_from_slice(&checksum4(payload));
+    if expected != checksum[0..4] {
+        return Err(anyhow!("checksum mismatch"));
+    }
+    let mut h160 = [0u8; 20];
+    h160.copy_from_slice(&payload[1..]);
+    Ok(h160)
+}
+
 fn checksum4(data: &[u8]) -> [u8; 4] {
     let mut h = Hasher::new();
     h.update(data);
@@ -309,6 +486,26 @@ fn main() -> Result<()> {
                     u.height
                 );
             }
+        }
+        Commands::Send { to, amount, fee } => {
+            let to_hash = decode_address(&to)?;
+            let key = wallet.default_key()?;
+            let pwd = prompt_password("Wallet password: ")?;
+            let sk_bytes = decrypt_key(&key.enc, &pwd)?;
+            let sk = SigningKey::from_slice(&sk_bytes).map_err(|e| anyhow!(e.to_string()))?;
+            let mut change_hash = [0u8; 20];
+            {
+                let mut h = Hasher::new();
+                h.update(&key.pubkey);
+                h.finalize_xof().fill(&mut change_hash);
+            }
+            let tx = wallet.consume_utxos(amount, fee, to_hash, change_hash, &sk)?;
+            let bytes = borsh::to_vec(&tx)?;
+            let submit_dir = cli.chain_db.join("tx-submissions");
+            std::fs::create_dir_all(&submit_dir)?;
+            let fname = format!("{}.tx", hex::encode(txid(&tx)?.as_bytes()));
+            std::fs::write(submit_dir.join(fname), bytes)?;
+            println!("Submitted transaction to local node dropbox.");
         }
         Commands::Rescan { from_height } => {
             let chain_db = ChainDb::open(&cli.chain_db).map_err(|e| anyhow!(e))?;
