@@ -2,6 +2,8 @@
 #![deny(clippy::unwrap_used)]
 #![deny(clippy::expect_used)]
 
+mod mempool;
+
 use clap::Parser;
 use std::env;
 use std::net::{SocketAddr, TcpListener};
@@ -18,8 +20,9 @@ use nulla_core::{
     TransactionKind, ADDRESS_PREFIX, CHAIN_ID, GENESIS_BITS, GENESIS_HASH_BYTES, GENESIS_NONCE,
     GENESIS_TIMESTAMP, NETWORK_MAGIC, PROTOCOL_VERSION,
 };
-use nulla_state::{block_subsidy, LedgerState};
 use nulla_p2p::net::{Message, P2pEngine, Policy};
+use nulla_state::{block_subsidy, LedgerState};
+use mempool::{Mempool, SubmitError as MempoolSubmitError, Transaction as MempoolTx};
 
 /// Extremely easy difficulty for devnet.
 const DEVNET_BITS: u32 = GENESIS_BITS;
@@ -77,6 +80,7 @@ fn main() {
         p2p.set_block_callback(move |block| db.store_block_if_index_matches(block));
     }
     let p2p = Arc::new(Mutex::new(p2p));
+    let _mempool = Arc::new(Mutex::new(Mempool::new()));
 
     let listener = TcpListener::bind(cfg.listen).expect("bind p2p socket");
     let _server = P2pEngine::serve_incoming(Arc::clone(&p2p), listener);
@@ -320,6 +324,17 @@ fn tx_merkle_root(txs: &[Transaction]) -> Hash32 {
 /// Compute a block hash from its header.
 fn block_hash(block: &Block) -> Hash32 {
     block_header_hash(&block.header).expect("header hash must succeed")
+}
+
+#[allow(dead_code)]
+fn submit_tx_to_node(
+    chain: &Arc<Mutex<ChainStore>>,
+    mempool: &Arc<Mutex<Mempool>>,
+    tx: MempoolTx,
+) -> Result<Hash32, MempoolSubmitError> {
+    let chain_guard = chain.lock().expect("chain lock");
+    let mut pool = mempool.lock().expect("mempool lock");
+    pool.submit_tx(&*chain_guard, tx)
 }
 
 /// Current UNIX time (seconds).

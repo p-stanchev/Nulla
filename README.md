@@ -10,12 +10,13 @@ Nulla is a privacy-first Proof-of-Work blockchain written in Rust. It targets pr
 
 ## Status
 
-- Consensus locked: genesis, tail emission v1, MTP(11) + ±2h drift, difficulty clamp, PoW vectors.
-- Persisted ChainStore: sled-backed headers/blocks/index + best tip, restart-safe (bodies reconciled on restart).
-- P2P v0: TCP, version/verack, ping/pong, getheaders/headers, header-first heaviest-work selection.
-- Block download: best-chain-only path with strict header↔block checks.
+- Consensus locked: genesis, tail emission v1, MTP(11) with +/-2h drift, difficulty clamp, PoW vectors.
+- Persisted ChainStore: sled-backed headers/blocks/index + best tip; restart-safe with body reconciliation.
+- P2P v0: TCP header-first sync (version/verack, ping/pong, getheaders/headers), heaviest-work selection.
+- Block download: best-chain-only path with strict header<->block checks.
 - Policy layer: reorg depth cap, peer scoring/bans, basic rate limits (non-consensus).
-- Wallet: transparent wallet scaffold landed (keygen/address/encrypted storage/scan CLI); sending/relay is next.
+- Wallet: transparent scaffold landed (keygen/address/encrypted storage/scan CLI); sending/relay next.
+- Mempool: transparent tx acceptance (node-only API) in progress.
 
 ---
 
@@ -31,13 +32,13 @@ Nulla is a privacy-first Proof-of-Work blockchain written in Rust. It targets pr
 
 ## Project Layout
 
-- `crates/nulla-core` — protocol types, hashing, serialization.
-- `crates/nulla-consensus` — PoW, difficulty, header/block validation.
-- `crates/nulla-state` — commitment tree, nullifier set, state transitions.
-- `crates/nulla-node` — node runtime, ChainStore integration, devnet loop.
-- `crates/nulla-p2p` — networking engine (TCP header-first, locators, fork handling).
-- `crates/nulla-wallet` — transparent wallet scaffold (CLI).
-- `crates/nulla-zk` — zk stubs for future shielded transfers.
+- `crates/nulla-core` - protocol types, hashing, serialization.
+- `crates/nulla-consensus` - PoW, difficulty, header/block validation.
+- `crates/nulla-state` - commitment tree, nullifier set, state transitions.
+- `crates/nulla-node` - node runtime, ChainStore integration, devnet loop.
+- `crates/nulla-p2p` - networking engine (TCP header-first, locators, fork handling).
+- `crates/nulla-wallet` - transparent wallet scaffold (CLI).
+- `crates/nulla-zk` - zk stubs for future shielded transfers.
 
 Each crate owns a single responsibility; there are no circular dependencies.
 
@@ -47,7 +48,7 @@ Each crate owns a single responsibility; there are no circular dependencies.
 
 Env:
 - CLI flags (primary): `--listen` (default `0.0.0.0:18444`), `--peers`, `--db` (default `./nulla.chain.db`), `--reorg-cap` (default `100`, policy-only).
-- Env fallbacks: `NULLA_LISTEN`, `NULLA_PEERS`, `NULLA_DB`, `NULLA_REORG_CAP`. Resolution order: flag → env → default.
+- Env fallbacks: `NULLA_LISTEN`, `NULLA_PEERS`, `NULLA_DB`, `NULLA_REORG_CAP`. Resolution order: flag > env > default.
 - Chain DBs live in the working directory by default: `nulla.chain.db`, plus `nulla.p2p.db` for P2P metadata.
 
 Examples (two local nodes):
@@ -86,7 +87,7 @@ cargo test --workspace --features dev-pow
 
 ## Roadmap (next)
 
-1) Wire wallet sending/signing and node mempool/tx relay to complete wallet → node → block roundtrip.
+1) Wire wallet sending/signing and node mempool/tx relay to complete wallet -> node -> block roundtrip.
 2) Tag `v0.1.0-testnet` once tx relay is stable.
 3) Begin zk primitives only after wallet + relay are solid.
 

@@ -210,6 +210,7 @@ impl ChainDb {
     }
 }
 
+#[allow(dead_code)]
 pub struct ChainStore {
     entries: HashMap<Hash32, ChainEntry>,
     best: Hash32,
@@ -223,6 +224,7 @@ pub struct ChainEntry {
 }
 
 impl ChainStore {
+    #[allow(dead_code)]
     #[allow(dead_code)]
     pub fn load_or_init(path: &Path, genesis: Block) -> Result<Self, String> {
         let db = ChainDb::open(path)?;

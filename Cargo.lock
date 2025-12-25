@@ -707,9 +707,11 @@ dependencies = [
 name = "nulla-node"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "borsh",
  "clap",
  "hex",
+ "k256",
  "nulla-consensus",
  "nulla-core",
  "nulla-p2p",
