@@ -132,12 +132,17 @@ fn main() {
             pool.get_tx(txid)
         });
         let mem_for_tx = Arc::clone(&mempool);
+        let net_for_tx = Arc::clone(&p2p);
         guard.set_tx_callback(move |tx| {
             let chain = chain_for_cb.lock().expect("chain lock");
             let mut pool = mem_for_tx.lock().expect("mempool");
-            pool.submit_tx(&*chain, tx.clone())
-                .map(|_| ())
-                .map_err(|e| format!("{:?}", e))
+            let txid = pool
+                .submit_tx(&*chain, tx.clone())
+                .map_err(|e| format!("{:?}", e))?;
+            // Re-announce to other peers.
+            let net = net_for_tx.lock().expect("p2p net");
+            net.broadcast(Message::InvTx(vec![txid]));
+            Ok(())
         });
     }
     let _ =

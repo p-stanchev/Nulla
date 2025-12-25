@@ -27,6 +27,7 @@ Nulla is a privacy-first Proof-of-Work blockchain written in Rust. It targets pr
 - **Fork Choice:** heaviest cumulative work with deterministic tie-breaker; difficulty-drop clamp enforced everywhere; single validation entrypoint (no bypass).
 - **P2P v0 (header-first):** TCP transport, locators, fork handling, restart safety. Dev-only easy PoW lives behind the `dev-pow` feature for tests/vector generation.
 - **Node:** devnet miner loop wired through ChainStore and P2pEngine; block download restricted to the best chain.
+- **Mempool/Fees:** transparent tx acceptance with base fee policy; txs reannounced over P2P.
 
 ---
 
@@ -73,6 +74,8 @@ NULLA_LISTEN=127.0.0.1:18445 \
 NULLA_PEERS=127.0.0.1:18444 \
 cargo run -p nulla-node
 ```
+
+Multi-node walkthrough: see `docs/multinode.md` for full P2P+wallet steps.
 
 ---
 

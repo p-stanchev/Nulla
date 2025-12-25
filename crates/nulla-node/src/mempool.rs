@@ -2,16 +2,15 @@ use std::collections::{HashMap, HashSet};
 
 use blake3::Hasher;
 use k256::ecdsa::{signature::Verifier, Signature, VerifyingKey};
-use nulla_core::{txid, Amount, OutPoint, Transaction, TransactionKind};
-
-#[cfg(test)]
-use nulla_core::Hash32;
-use nulla_core::Hash32 as TxId;
+use nulla_core::{txid, Amount, Hash32, OutPoint, Transaction, TransactionKind, TxId};
 
 pub trait ChainView {
     /// Returns (value, pubkey_hash) for an outpoint if unspent in best chain.
     fn lookup_outpoint(&self, out: &OutPoint) -> Option<(u64, [u8; 20])>;
 }
+
+/// Node policy: minimum fee per transaction (atoms). Not consensus.
+pub const BASE_FEE_ATOMS: u64 = 1000;
 
 #[derive(Debug)]
 pub enum SubmitError {
@@ -21,6 +20,7 @@ pub enum SubmitError {
     DuplicateInput,
     UnknownInput,
     AlreadySpent,
+    LowFee,
     InsufficientInputValue,
     BadSignature,
     TooLarge,
@@ -102,6 +102,10 @@ impl Mempool {
             return Err(SubmitError::InsufficientInputValue);
         }
 
+        if fee < BASE_FEE_ATOMS {
+            return Err(SubmitError::LowFee);
+        }
+
         // signature checks
         let sighash = tx_sighash(&tx, &resolved_prevouts);
         for (_value, pk_hash, pubkey, sig, _prevout) in resolved_prevouts {
@@ -153,7 +157,18 @@ impl Mempool {
     }
 
     pub fn pending(&self) -> Vec<Transaction> {
-        self.txs.values().cloned().collect()
+        let mut v: Vec<_> = self.txs.values().cloned().collect();
+        v.sort_by(|a, b| {
+            let fee_cmp = b.fee.atoms().cmp(&a.fee.atoms());
+            if fee_cmp == std::cmp::Ordering::Equal {
+                let ha = txid(a).unwrap_or(Hash32::zero());
+                let hb = txid(b).unwrap_or(Hash32::zero());
+                ha.as_bytes().cmp(hb.as_bytes())
+            } else {
+                fee_cmp
+            }
+        });
+        v
     }
 
     pub fn has_tx(&self, id: &TxId) -> bool {
@@ -251,13 +266,13 @@ mod tests {
                 sig: vec![],
             }],
             transparent_outputs: vec![TransparentOutput {
-                value: Amount::from_atoms(prev_value - 1),
+                value: Amount::from_atoms(prev_value - BASE_FEE_ATOMS),
                 pubkey_hash: pk_hash,
             }],
             anchor_root: Hash32::zero(),
             nullifiers: vec![],
             outputs: vec![],
-            fee: Amount::zero(),
+            fee: Amount::from_atoms(BASE_FEE_ATOMS),
             claimed_subsidy: Amount::zero(),
             claimed_fees: Amount::zero(),
             proof: vec![],
@@ -287,9 +302,9 @@ mod tests {
         let mut chain = FakeChain {
             utxos: HashMap::new(),
         };
-        chain.utxos.insert(prev, (10, pk_hash));
+        chain.utxos.insert(prev, (BASE_FEE_ATOMS + 10, pk_hash));
 
-        let tx = make_tx(&sk, prev, 10);
+        let tx = make_tx(&sk, prev, BASE_FEE_ATOMS + 10);
         let mut mempool = Mempool::new();
         let id = mempool.submit_tx(&chain, tx).expect("valid");
         assert!(mempool.txs.contains_key(&id));
@@ -311,13 +326,13 @@ mod tests {
                 sig: vec![0u8; 1],
             }],
             transparent_outputs: vec![TransparentOutput {
-                value: Amount::from_atoms(1),
+                value: Amount::from_atoms(BASE_FEE_ATOMS),
                 pubkey_hash: [0u8; 20],
             }],
             anchor_root: Hash32::zero(),
             nullifiers: vec![],
             outputs: vec![],
-            fee: Amount::zero(),
+            fee: Amount::from_atoms(BASE_FEE_ATOMS),
             claimed_subsidy: Amount::zero(),
             claimed_fees: Amount::zero(),
             proof: vec![],
@@ -343,7 +358,7 @@ mod tests {
         let mut chain = FakeChain {
             utxos: HashMap::new(),
         };
-        chain.utxos.insert(prev, (10, pk_hash));
+        chain.utxos.insert(prev, (BASE_FEE_ATOMS + 10, pk_hash));
 
         let tx = Transaction {
             version: PROTOCOL_VERSION,
@@ -361,13 +376,13 @@ mod tests {
                 },
             ],
             transparent_outputs: vec![TransparentOutput {
-                value: Amount::from_atoms(1),
+                value: Amount::from_atoms(BASE_FEE_ATOMS),
                 pubkey_hash: pk_hash,
             }],
             anchor_root: Hash32::zero(),
             nullifiers: vec![],
             outputs: vec![],
-            fee: Amount::zero(),
+            fee: Amount::from_atoms(BASE_FEE_ATOMS),
             claimed_subsidy: Amount::zero(),
             claimed_fees: Amount::zero(),
             proof: vec![],
@@ -390,12 +405,12 @@ mod tests {
         let mut chain = FakeChain {
             utxos: HashMap::new(),
         };
-        chain.utxos.insert(prev, (10, pk_hash));
+        chain.utxos.insert(prev, (BASE_FEE_ATOMS + 10, pk_hash));
         let mut mempool = Mempool::new();
-        let tx1 = make_tx(&sk, prev, 10);
+        let tx1 = make_tx(&sk, prev, BASE_FEE_ATOMS + 10);
         mempool.submit_tx(&chain, tx1).unwrap();
 
-        let tx2 = make_tx(&sk, prev, 10);
+        let tx2 = make_tx(&sk, prev, BASE_FEE_ATOMS + 10);
         let err = mempool.submit_tx(&chain, tx2).unwrap_err();
         matches!(err, SubmitError::AlreadySpent);
     }
@@ -429,7 +444,7 @@ mod tests {
             anchor_root: Hash32::zero(),
             nullifiers: vec![],
             outputs: vec![],
-            fee: Amount::zero(),
+            fee: Amount::from_atoms(BASE_FEE_ATOMS),
             claimed_subsidy: Amount::zero(),
             claimed_fees: Amount::zero(),
             proof: vec![],

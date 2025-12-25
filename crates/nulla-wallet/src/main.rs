@@ -29,6 +29,8 @@ const TREE_KEYS: &str = "keys";
 const TREE_META: &str = "meta";
 const TREE_UTXOS: &str = "utxos";
 const ADDR_PREFIX: u8 = 0x35;
+/// Node policy: must match nulla-node BASE_FEE_ATOMS.
+const BASE_FEE_ATOMS: u64 = 1000;
 
 fn argon2_params() -> Argon2<'static> {
     Argon2::default()
@@ -61,8 +63,6 @@ enum Commands {
         to: String,
         #[arg(long)]
         amount: u64,
-        #[arg(long, default_value = "0")]
-        fee: u64,
     },
     Rescan {
         #[arg(long)]
@@ -476,7 +476,7 @@ fn main() -> Result<()> {
                 );
             }
         }
-        Commands::Send { to, amount, fee } => {
+        Commands::Send { to, amount } => {
             let to_hash = decode_address(&to)?;
             let key = wallet.default_key()?;
             let pwd = prompt_password("Wallet password: ")?;
@@ -488,7 +488,7 @@ fn main() -> Result<()> {
                 h.update(&key.pubkey);
                 h.finalize_xof().fill(&mut change_hash);
             }
-            let tx = wallet.consume_utxos(amount, fee, to_hash, change_hash, &sk)?;
+            let tx = wallet.consume_utxos(amount, BASE_FEE_ATOMS, to_hash, change_hash, &sk)?;
             let bytes = borsh::to_vec(&tx)?;
             let tx_hex = hex::encode(bytes);
             match rpc.submit_tx(&tx_hex)? {

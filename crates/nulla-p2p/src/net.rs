@@ -795,10 +795,13 @@ impl P2pEngine {
 mod tests {
     use super::*;
     use std::net::TcpListener;
-    use std::sync::Arc;
+    use std::sync::{mpsc, Arc, Mutex};
     use std::time::Duration;
     use tempfile::tempdir;
-    use nulla_core::{Amount, Commitment, Transaction, TransactionKind, PROTOCOL_VERSION};
+    use nulla_core::{
+        Amount, Commitment, OutPoint, Transaction, TransactionKind, TransparentInput, TransparentOutput,
+        PROTOCOL_VERSION,
+    };
 
     fn genesis_header() -> BlockHeader {
         let prev = Hash32::zero();
@@ -991,5 +994,180 @@ mod tests {
             .handle_message(2, Message::Headers(vec![fork]))
             .expect_err("policy should reject deep reorg");
         matches!(err, P2pError::Policy(_));
+    }
+
+    #[test]
+    fn tx_reannounce_to_other_peers() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("db");
+        let genesis = genesis_header();
+        let mut p2p = P2pEngine::new(&path, genesis).unwrap();
+
+        // Two peers connected.
+        p2p.peers.insert(1, PeerState::default());
+        p2p.peers.insert(2, PeerState::default());
+
+        // Track accepted txs.
+        let accepted: Arc<Mutex<Vec<Hash32>>> = Arc::new(Mutex::new(Vec::new()));
+        let acc_cb = Arc::clone(&accepted);
+        p2p.set_tx_callback(move |tx| {
+            let id = txid(tx).map_err(|e| e.to_string())?;
+            acc_cb.lock().unwrap().push(id);
+            Ok(())
+        });
+
+        p2p.set_has_tx(|_| false);
+        p2p.set_lookup_tx(|_| None);
+
+        // Dummy regular tx.
+        let tx = Transaction {
+            version: PROTOCOL_VERSION,
+            kind: TransactionKind::Regular,
+            transparent_inputs: vec![TransparentInput {
+                prevout: OutPoint {
+                    txid: Hash32::zero(),
+                    vout: 0,
+                },
+                sig: vec![],
+                pubkey: vec![],
+            }],
+            transparent_outputs: vec![TransparentOutput {
+                value: Amount::from_atoms(1),
+                pubkey_hash: [0u8; 20],
+            }],
+            anchor_root: Hash32::zero(),
+            nullifiers: vec![],
+            outputs: vec![],
+            fee: Amount::zero(),
+            claimed_subsidy: Amount::zero(),
+            claimed_fees: Amount::zero(),
+            proof: vec![],
+            memo: vec![],
+        };
+
+        let out = p2p.handle_message(1, Message::Tx(tx)).expect("handle tx");
+
+        // Peer 2 should receive an InvTx for the new txid.
+        assert_eq!(out.len(), 1);
+        let (pid, msg) = &out[0];
+        assert_eq!(*pid, 2);
+        match msg {
+            Message::InvTx(list) => {
+                assert_eq!(list.len(), 1);
+                let stored = accepted.lock().unwrap();
+                assert_eq!(stored[0], list[0]);
+            }
+            _ => panic!("expected InvTx"),
+        }
+    }
+
+    #[test]
+    fn inv_tx_requests_unknown() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("db");
+        let genesis = genesis_header();
+        let mut p2p = P2pEngine::new(&path, genesis).unwrap();
+        p2p.peers.insert(1, PeerState::default());
+        p2p.set_has_tx(|_| false);
+        let h = Hash32::from([1u8; 32]);
+        let out = p2p.handle_message(1, Message::InvTx(vec![h])).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].0, 1);
+        match &out[0].1 {
+            Message::GetTx(x) => assert_eq!(*x, h),
+            _ => panic!("expected GetTx"),
+        }
+    }
+
+    #[test]
+    fn tx_propagates_between_engines() {
+        let dir = tempdir().unwrap();
+        let a_path = dir.path().join("a.db");
+        let b_path = dir.path().join("b.db");
+        let genesis = genesis_header();
+        let mut a = P2pEngine::new(&a_path, genesis.clone()).unwrap();
+        let mut b = P2pEngine::new(&b_path, genesis).unwrap();
+
+        // Wire peers and outbound channels manually.
+        let (tx_ab, rx_ab) = mpsc::channel::<Message>();
+        let (tx_ba, rx_ba) = mpsc::channel::<Message>();
+        a.peers.insert(1, PeerState::default());
+        b.peers.insert(0, PeerState::default());
+        a.outbound.insert(1, tx_ab.clone());
+        b.outbound.insert(0, tx_ba.clone());
+
+        let acc_a: Arc<Mutex<Vec<Hash32>>> = Arc::new(Mutex::new(Vec::new()));
+        let acc_b: Arc<Mutex<Vec<Hash32>>> = Arc::new(Mutex::new(Vec::new()));
+        let acc_a_cb = Arc::clone(&acc_a);
+        let acc_b_cb = Arc::clone(&acc_b);
+
+        a.set_tx_callback(move |tx| {
+            let id = txid(tx).map_err(|e| e.to_string())?;
+            acc_a_cb.lock().unwrap().push(id);
+            Ok(())
+        });
+        b.set_tx_callback(move |tx| {
+            let id = txid(tx).map_err(|e| e.to_string())?;
+            acc_b_cb.lock().unwrap().push(id);
+            Ok(())
+        });
+
+        a.set_has_tx(|_| false);
+        b.set_has_tx(|_| false);
+        a.set_lookup_tx(|_| None);
+        b.set_lookup_tx(|_| None);
+
+        // Dummy tx.
+        let tx = Transaction {
+            version: PROTOCOL_VERSION,
+            kind: TransactionKind::Regular,
+            transparent_inputs: vec![TransparentInput {
+                prevout: OutPoint {
+                    txid: Hash32::zero(),
+                    vout: 0,
+                },
+                sig: vec![],
+                pubkey: vec![],
+            }],
+            transparent_outputs: vec![TransparentOutput {
+                value: Amount::from_atoms(1),
+                pubkey_hash: [0u8; 20],
+            }],
+            anchor_root: Hash32::zero(),
+            nullifiers: vec![],
+            outputs: vec![],
+            fee: Amount::zero(),
+            claimed_subsidy: Amount::zero(),
+            claimed_fees: Amount::zero(),
+            proof: vec![],
+            memo: vec![],
+        };
+
+        // Submit tx to engine A (peer 1).
+        let out = a.handle_message(1, Message::Tx(tx)).expect("tx ok");
+        for (pid, msg) in out {
+            a.send_to(pid, msg).unwrap();
+        }
+
+        // Deliver messages from A -> B.
+        while let Ok(m) = rx_ab.try_recv() {
+            let out = b.handle_message(0, m).unwrap_or_default();
+            for (pid, msg) in out {
+                b.send_to(pid, msg).unwrap_or(());
+            }
+        }
+
+        // Deliver any messages from B -> A (e.g., reannounce).
+        while let Ok(m) = rx_ba.try_recv() {
+            let out = a.handle_message(1, m).unwrap_or_default();
+            for (pid, msg) in out {
+                a.send_to(pid, msg).unwrap_or(());
+            }
+        }
+
+        // Both sides should have accepted the txid.
+        assert_eq!(acc_a.lock().unwrap().len(), 1);
+        assert_eq!(acc_b.lock().unwrap().len(), 1);
+        assert_eq!(acc_a.lock().unwrap()[0], acc_b.lock().unwrap()[0]);
     }
 }
