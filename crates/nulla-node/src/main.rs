@@ -128,6 +128,13 @@ fn main() {
         // Drain any locally submitted transactions (file dropbox).
         drain_local_submissions(&cfg.db_path, &chain, &mempool);
 
+        // Drop any mempool txs that no longer have valid inputs on the best chain.
+        {
+            let chain_guard = chain.lock().expect("chain lock");
+            let mut pool = mempool.lock().expect("mempool");
+            pool.purge_conflicts_with_new_tip(&*chain_guard);
+        }
+
         // Gather txs from mempool (no ordering/limits yet).
         let txs_from_pool = {
             let pool = mempool.lock().expect("mempool");

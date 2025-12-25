@@ -2,7 +2,10 @@ use std::collections::{HashMap, HashSet};
 
 use blake3::Hasher;
 use k256::ecdsa::{signature::Verifier, Signature, VerifyingKey};
-use nulla_core::{txid, Amount, Hash32, OutPoint, Transaction, TransactionKind};
+use nulla_core::{txid, Amount, OutPoint, Transaction, TransactionKind};
+
+#[cfg(test)]
+use nulla_core::Hash32;
 use nulla_core::Hash32 as TxId;
 
 pub trait ChainView {

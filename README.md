@@ -46,20 +46,22 @@ Each crate owns a single responsibility; there are no circular dependencies.
 
 ## Getting Started (beginner friendly)
 
-Node
-- Start a node (mining to your address):  
+Node (must be running for wallet operations)
+- Start + mine to your address (PowerShell/cmd):  
   `cargo run -p nulla-node -- --miner-address <Base58 addr>`
 - Defaults: listen `0.0.0.0:18444`, db `./nulla.chain.db`, reorg-cap `100`.  
   Env fallbacks: `NULLA_LISTEN`, `NULLA_PEERS`, `NULLA_DB`, `NULLA_REORG_CAP`, `NULLA_MINER_ADDRESS`.
-- RPC (local only by default): `NULLA_RPC_LISTEN=127.0.0.1:18445` (default), `NULLA_RPC_AUTH_TOKEN` optional.
+- RPC: `NULLA_RPC_LISTEN=127.0.0.1:18445` (default), `NULLA_RPC_AUTH_TOKEN` optional.
 
-Wallet (talks to node via RPC; does **not** open the node DB)
+Wallet (RPC-only; does **not** open the node DB)
 - Init: `cargo run -p nulla-wallet -- init`
 - Show address: `cargo run -p nulla-wallet -- addr`
-- Rescan (node must be running): `cargo run -p nulla-wallet -- rescan`
-- Check balance: `cargo run -p nulla-wallet -- balance`
+- Rescan UTXOs (node running):  
+  `cargo run -p nulla-wallet -- rescan`
+- Balance: `cargo run -p nulla-wallet -- balance`
 - Send: `cargo run -p nulla-wallet -- send --to <addr> --amount <atoms> --fee <atoms>`
-- Wallet flags: `--wallet-db` (default `nulla.wallet.db`), `--rpc` (default `127.0.0.1:18445`), `--rpc-auth-token` (if node requires it).
+- Common flags: `--wallet-db <path>` (default `nulla.wallet.db`), `--rpc <addr>` (default `127.0.0.1:18445`), `--rpc-auth-token <token>` if the node requires it.
+- Command syntax: keep a single `--` between cargo and wallet args; do **not** place an extra `--` before the subcommand (e.g., `cargo run -p nulla-wallet -- --wallet-db my.db rescan`).
 
 Two-node example (header sync)
 ```bash
@@ -77,10 +79,17 @@ cargo run -p nulla-node
 ## Testnet Flow (quick checklist)
 
 1) Start node with your miner address.  
-2) Wallet `init` → `rescan` (node running).  
-3) Mine a block → wallet balance increases (coinbase UTXO is transparent).  
-4) Wallet `send` → mine again → tx confirmed.  
+2) Wallet `init` + `addr`, then `rescan` (node running).  
+3) Mine a block → wallet balance increases (transparent coinbase UTXO).  
+4) Wallet `send --to <addr> --amount <atoms> --fee 0` → mine again → tx confirmed.  
 5) Repeat; restart nodes to confirm persistence.
+
+### Common gotchas (send/rescan/mine)
+- No balance after send: keep the node running and mine at least one block; then rescan the receiver wallet.
+- UnknownInput: rescan the sender wallet, ensure the node is running, and that the miner is paying to the same wallet you’re spending from.
+- Wrong miner address: start the node with the address shown by `cargo run -p nulla-wallet -- --wallet-db <db> addr`.
+- RPC refused: start the node first (default RPC 127.0.0.1:18445), or pass `--rpc <addr>`/`--rpc-auth-token <token>`.
+- Command syntax: only one `--` between cargo and wallet args, e.g. `cargo run -p nulla-wallet -- --wallet-db my.db rescan`.
 
 Notes:
 - Tx relay is local-only for now (no P2P tx gossip yet).
