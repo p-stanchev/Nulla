@@ -107,8 +107,6 @@ fn main() {
         .ok()
         .unwrap_or_else(|| "127.0.0.1:18445".to_string());
     let rpc_auth = env::var("NULLA_RPC_AUTH_TOKEN").ok();
-    let _ = rpc::serve_rpc(&rpc_listen, rpc_auth, Arc::clone(&chain), Arc::clone(&mempool));
-    println!("RPC listening on {rpc_listen}");
     {
         let chain_for_cb = Arc::clone(&chain);
         p2p.lock().expect("p2p").set_block_callback(move |block| {
@@ -120,6 +118,31 @@ fn main() {
             Ok(())
         });
     }
+    {
+        let chain_for_cb = Arc::clone(&chain);
+        let mem_for_cb = Arc::clone(&mempool);
+        let mut guard = p2p.lock().expect("p2p");
+        guard.set_has_tx(move |txid| {
+            let pool = mem_for_cb.lock().expect("mempool");
+            pool.has_tx(txid)
+        });
+        let mem_for_lookup = Arc::clone(&mempool);
+        guard.set_lookup_tx(move |txid| {
+            let pool = mem_for_lookup.lock().expect("mempool");
+            pool.get_tx(txid)
+        });
+        let mem_for_tx = Arc::clone(&mempool);
+        guard.set_tx_callback(move |tx| {
+            let chain = chain_for_cb.lock().expect("chain lock");
+            let mut pool = mem_for_tx.lock().expect("mempool");
+            pool.submit_tx(&*chain, tx.clone())
+                .map(|_| ())
+                .map_err(|e| format!("{:?}", e))
+        });
+    }
+    let _ =
+        rpc::serve_rpc(&rpc_listen, rpc_auth, Arc::clone(&chain), Arc::clone(&mempool), Arc::clone(&p2p));
+    println!("RPC listening on {rpc_listen}");
 
     // -----------------
     // Main mining loop
@@ -370,11 +393,17 @@ fn block_hash(block: &Block) -> Hash32 {
 fn submit_tx_to_node(
     chain: &Arc<Mutex<ChainStore>>,
     mempool: &Arc<Mutex<Mempool>>,
+    p2p: Option<&Arc<Mutex<P2pEngine>>>,
     tx: Transaction,
 ) -> Result<Hash32, MempoolSubmitError> {
     let chain_guard = chain.lock().expect("chain lock");
     let mut pool = mempool.lock().expect("mempool lock");
-    pool.submit_tx(&*chain_guard, tx)
+    let txid = pool.submit_tx(&*chain_guard, tx)?;
+    if let Some(net) = p2p {
+        let guard = net.lock().expect("p2p");
+        guard.broadcast(Message::InvTx(vec![txid]));
+    }
+    Ok(txid)
 }
 
 fn decode_address(addr: &str) -> Result<[u8; 20], String> {
@@ -431,7 +460,7 @@ fn drain_local_submissions(
             Ok(t) => t,
             Err(_) => continue,
         };
-        let res = submit_tx_to_node(chain, mempool, tx);
+        let res = submit_tx_to_node(chain, mempool, None, tx);
         if res.is_ok() {
             let _ = fs::remove_file(&path);
         }

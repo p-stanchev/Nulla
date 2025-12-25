@@ -9,6 +9,7 @@ use serde_json::{json, Value};
 
 use crate::{decode_address, submit_tx_to_node};
 use crate::mempool::Mempool;
+use nulla_p2p::net::P2pEngine;
 use crate::ChainStore;
 
 pub fn serve_rpc(
@@ -16,6 +17,7 @@ pub fn serve_rpc(
     auth_token: Option<String>,
     chain: Arc<Mutex<ChainStore>>,
     mempool: Arc<Mutex<Mempool>>,
+    p2p: Arc<Mutex<P2pEngine>>,
 ) -> std::io::Result<()> {
     let listener = TcpListener::bind(addr)?;
     thread::spawn(move || {
@@ -23,8 +25,9 @@ pub fn serve_rpc(
             if let Ok(stream) = stream {
                 let chain = Arc::clone(&chain);
                 let mempool = Arc::clone(&mempool);
+                let p2p = Arc::clone(&p2p);
                 let auth_token = auth_token.clone();
-                thread::spawn(move || handle_client(stream, auth_token, chain, mempool));
+                thread::spawn(move || handle_client(stream, auth_token, chain, mempool, p2p));
             }
         }
     });
@@ -36,6 +39,7 @@ fn handle_client(
     auth_token: Option<String>,
     chain: Arc<Mutex<ChainStore>>,
     mempool: Arc<Mutex<Mempool>>,
+    p2p: Arc<Mutex<P2pEngine>>,
 ) {
     let mut reader = BufReader::new(stream.try_clone().unwrap());
     let mut line = String::new();
@@ -44,7 +48,7 @@ fn handle_client(
             break;
         }
         let resp = match serde_json::from_str::<Value>(&line) {
-            Ok(v) => handle_request(v, &auth_token, &chain, &mempool),
+            Ok(v) => handle_request(v, &auth_token, &chain, &mempool, &p2p),
             Err(_) => json!({"ok": false, "error": "invalid json"}),
         };
         line.clear();
@@ -59,6 +63,7 @@ fn handle_request(
     auth_token: &Option<String>,
     chain: &Arc<Mutex<ChainStore>>,
     mempool: &Arc<Mutex<Mempool>>,
+    p2p: &Arc<Mutex<P2pEngine>>,
 ) -> Value {
     if let Some(expected) = auth_token {
         match v.get("auth").and_then(|a| a.as_str()) {
@@ -123,7 +128,7 @@ fn handle_request(
                 Ok(t) => t,
                 Err(_) => return json!({"ok": false, "error": "decode failed"}),
             };
-            match submit_tx_to_node(chain, mempool, tx) {
+            match submit_tx_to_node(chain, mempool, Some(p2p), tx) {
                 Ok(id) => json!({"ok": true, "txid": hex::encode(id.as_bytes())}),
                 Err(e) => json!({"ok": false, "error": format!("{:?}", e)}),
             }

@@ -208,7 +208,8 @@ impl Wallet {
 
     fn rescan_via_rpc(&self, rpc: &RpcClient, from_height: Option<u64>) -> Result<()> {
         let meta = self.read_meta()?;
-        let start_height = from_height.unwrap_or(meta.last_scanned_height);
+        // Until we track spent outputs incrementally, always rebuild from height 0 (or the user-specified override).
+        let start_height = from_height.unwrap_or(0);
         self.utxos().clear()?;
 
         // Collect wallet pubkey hashes.

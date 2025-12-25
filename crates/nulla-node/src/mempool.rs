@@ -155,6 +155,14 @@ impl Mempool {
     pub fn pending(&self) -> Vec<Transaction> {
         self.txs.values().cloned().collect()
     }
+
+    pub fn has_tx(&self, id: &TxId) -> bool {
+        self.txs.contains_key(id)
+    }
+
+    pub fn get_tx(&self, id: &TxId) -> Option<Transaction> {
+        self.txs.get(id).cloned()
+    }
 }
 
 // Placeholder until transparent UTXO tracking is wired into ChainStore.
