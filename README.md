@@ -11,11 +11,11 @@ Nulla is a privacy-first Proof-of-Work blockchain written in Rust. It targets pr
 ## Status
 
 - Consensus locked: genesis, tail emission v1, MTP(11) + ±2h drift, difficulty clamp, PoW vectors.
-- Persisted ChainStore: sled-backed headers/blocks/index + best tip, restart-safe.
+- Persisted ChainStore: sled-backed headers/blocks/index + best tip, restart-safe (bodies reconciled on restart).
 - P2P v0: TCP, version/verack, ping/pong, getheaders/headers, header-first heaviest-work selection.
-- Block download: best-chain-only path with strict header↔block checks scaffolded.
+- Block download: best-chain-only path with strict header↔block checks.
 - Policy layer: reorg depth cap, peer scoring/bans, basic rate limits (non-consensus).
-- Wallet: out of scope until testnet sync is stable.
+- Wallet: transparent wallet scaffold landed (keygen/address/encrypted storage/scan CLI); sending/relay is next.
 
 ---
 
@@ -36,7 +36,8 @@ Nulla is a privacy-first Proof-of-Work blockchain written in Rust. It targets pr
 - `crates/nulla-state` — commitment tree, nullifier set, state transitions.
 - `crates/nulla-node` — node runtime, ChainStore integration, devnet loop.
 - `crates/nulla-p2p` — networking engine (TCP header-first, locators, fork handling).
-- `crates/nulla-wallet`, `crates/nulla-zk` — stubs for future wallet and zk work.
+- `crates/nulla-wallet` — transparent wallet scaffold (CLI).
+- `crates/nulla-zk` — zk stubs for future shielded transfers.
 
 Each crate owns a single responsibility; there are no circular dependencies.
 
@@ -67,7 +68,8 @@ cargo run -p nulla-node
 - Two nodes: use the run examples above; expose `--listen 0.0.0.0:18444` on at least one node so others can dial.
 - Connecting peers: pass `--peers ip:port,...` (or `NULLA_PEERS`) to seed connections.
 - Mining (solo, devnet loop): run `cargo run -p nulla-node` to produce deterministic blocks; PoW remains consensus-valid (dev-pow is test-only).
-- Known limitations: no wallet yet, no UI, no explorers, no Stratum; focus is on sync/restart correctness and fork handling.
+- Wallet status: transparent wallet scaffold exists (init/addr/balance/list/rescan), sending/relay not yet wired.
+- Known limitations: no zk yet, no explorers, no Stratum; focus is on sync/restart correctness and fork handling.
 
 ---
 
@@ -84,9 +86,9 @@ cargo test --workspace --features dev-pow
 
 ## Roadmap (next)
 
-1) Finalize block sync persistence across restarts (headers + bodies).
-2) Tag `v0.1.0-testnet` once block sync is stable.
-3) Only then start wallet CLI work (keygen, address encoding, scan/send).
+1) Wire wallet sending/signing and node mempool/tx relay to complete wallet → node → block roundtrip.
+2) Tag `v0.1.0-testnet` once tx relay is stable.
+3) Begin zk primitives only after wallet + relay are solid.
 
 ---
 
