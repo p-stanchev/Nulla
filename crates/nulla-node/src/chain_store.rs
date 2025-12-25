@@ -493,9 +493,7 @@ impl ChainStore {
                         pubkey_hash: out.pubkey_hash,
                         height: block_height,
                     };
-                    if utxos.insert(op, rec).is_some() {
-                        return Err("duplicate outpoint insertion".into());
-                    }
+                    utxos.insert(op, rec);
                 }
 
                 if tx.kind == TransactionKind::Regular {
