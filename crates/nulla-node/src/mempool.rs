@@ -1,11 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
 use blake3::Hasher;
-use k256::ecdsa::{signature::Verifier, Signature, SigningKey, VerifyingKey};
-use k256::EncodedPoint;
-use nulla_core::{
-    txid, Amount, Hash32, OutPoint, Transaction, TransactionKind, TransparentInput, TransparentOutput,
-};
+use k256::ecdsa::{signature::Verifier, Signature, VerifyingKey};
+use nulla_core::{txid, Amount, Hash32, OutPoint, Transaction, TransactionKind};
 use nulla_core::Hash32 as TxId;
 
 pub trait ChainView {
@@ -198,8 +195,10 @@ fn tx_sighash(tx: &Transaction, resolved_inputs: &[(u64, [u8; 20], &Vec<u8>, &Ve
 mod tests {
     use super::*;
     use k256::ecdsa::signature::Signer;
+    use k256::ecdsa::SigningKey;
+    use k256::EncodedPoint;
     use k256::elliptic_curve::rand_core::OsRng;
-    use nulla_core::PROTOCOL_VERSION;
+    use nulla_core::{TransparentInput, TransparentOutput, PROTOCOL_VERSION};
 
     struct FakeChain {
         utxos: HashMap<OutPoint, (u64, [u8; 20])>,

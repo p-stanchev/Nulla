@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+mod rpc_client;
+
 use std::path::PathBuf;
 
 use anyhow::{anyhow, Result};
@@ -16,9 +18,9 @@ use k256::{
 };
 use nulla_core::{
     Amount, Hash32, OutPoint, Transaction, TransactionKind, TransparentInput, TransparentOutput,
-    PROTOCOL_VERSION, txid,
+    PROTOCOL_VERSION,
 };
-use nulla_node::chain_store::ChainDb;
+use rpc_client::RpcClient;
 use rand_core::{OsRng, RngCore};
 use rpassword::prompt_password;
 use zeroize::Zeroizing;
@@ -37,8 +39,10 @@ fn argon2_params() -> Argon2<'static> {
 struct Cli {
     #[arg(long, default_value = "nulla.wallet.db")]
     wallet_db: PathBuf,
-    #[arg(long, default_value = "nulla.chain.db")]
-    chain_db: PathBuf,
+    #[arg(long, default_value = "127.0.0.1:18445")]
+    rpc: String,
+    #[arg(long)]
+    rpc_auth_token: Option<String>,
     #[command(subcommand)]
     command: Commands,
 }
@@ -202,14 +206,9 @@ impl Wallet {
         Ok(out)
     }
 
-    fn rescan(&self, chain_db: &ChainDb, from_height: Option<u64>) -> Result<()> {
+    fn rescan_via_rpc(&self, rpc: &RpcClient, from_height: Option<u64>) -> Result<()> {
         let meta = self.read_meta()?;
         let start_height = from_height.unwrap_or(meta.last_scanned_height);
-        let best = chain_db
-            .best_tip_by_work()
-            .map_err(|e| anyhow!(e))?
-            .unwrap_or_else(|| Hash32::from([0u8; 32]));
-        // Clear UTXOs for a full rescan.
         self.utxos().clear()?;
 
         // Collect wallet pubkey hashes.
@@ -224,28 +223,21 @@ impl Wallet {
             pk_hashes.push((h160, rec.address));
         }
 
-        let utxos = chain_db.all_utxos().map_err(|e| anyhow!(e))?;
         let mut found = 0usize;
-        for (op, rec) in utxos {
-            if rec.height < start_height {
-                continue;
-            }
-            if let Some((_h, addr)) = pk_hashes.iter().find(|(h, _)| h == &rec.pubkey_hash) {
-                let wr = UtxoRecord {
-                    txid: op.txid,
-                    vout: op.vout,
-                    value: rec.value,
-                    height: rec.height,
-                    pubkey_hash: rec.pubkey_hash,
-                };
-                let key = format!("{}:{}", hex::encode(op.txid.as_bytes()), op.vout);
-                self.utxos().insert(key.as_bytes(), borsh::to_vec(&wr)?)?;
+        for (pk_hash, addr) in pk_hashes {
+            let utxos = rpc.get_utxos(&pk_hash)?;
+            for u in utxos {
+                if u.height < start_height {
+                    continue;
+                }
+                let key = format!("{}:{}", hex::encode(u.txid.as_bytes()), u.vout);
+                self.utxos().insert(key.as_bytes(), borsh::to_vec(&u)?)?;
                 println!(
                     "Found UTXO {}:{} value={} height={} addr={}",
-                    hex::encode(op.txid.as_bytes()),
-                    op.vout,
-                    rec.value,
-                    rec.height,
+                    hex::encode(u.txid.as_bytes()),
+                    u.vout,
+                    u.value,
+                    u.height,
                     addr
                 );
                 found += 1;
@@ -253,12 +245,7 @@ impl Wallet {
         }
 
         let mut new_meta = meta;
-        new_meta.last_scanned_height = chain_db
-            .get_index(&best)
-            .ok()
-            .flatten()
-            .map(|i| i.height)
-            .unwrap_or(start_height);
+        new_meta.last_scanned_height = rpc.best_height().unwrap_or(start_height);
         self.write_meta(&new_meta)?;
         println!(
             "Rescan complete. Scanned from height {}. UTXOs stored: {}",
@@ -453,6 +440,7 @@ fn checksum4(data: &[u8]) -> [u8; 4] {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let wallet = Wallet::open(&cli.wallet_db)?;
+    let rpc = RpcClient::new(&cli.rpc, cli.rpc_auth_token.clone());
 
     match cli.command {
         Commands::Init => {
@@ -501,15 +489,18 @@ fn main() -> Result<()> {
             }
             let tx = wallet.consume_utxos(amount, fee, to_hash, change_hash, &sk)?;
             let bytes = borsh::to_vec(&tx)?;
-            let submit_dir = cli.chain_db.join("tx-submissions");
-            std::fs::create_dir_all(&submit_dir)?;
-            let fname = format!("{}.tx", hex::encode(txid(&tx)?.as_bytes()));
-            std::fs::write(submit_dir.join(fname), bytes)?;
-            println!("Submitted transaction to local node dropbox.");
+            let tx_hex = hex::encode(bytes);
+            match rpc.submit_tx(&tx_hex)? {
+                Ok(id) => {
+                    println!("Submitted tx {}", hex::encode(id.as_bytes()));
+                }
+                Err(e) => {
+                    println!("Submit failed: {e}");
+                }
+            }
         }
         Commands::Rescan { from_height } => {
-            let chain_db = ChainDb::open(&cli.chain_db).map_err(|e| anyhow!(e))?;
-            wallet.rescan(&chain_db, from_height)?;
+            wallet.rescan_via_rpc(&rpc, from_height)?;
         }
     }
 

@@ -766,6 +766,8 @@ dependencies = [
  "nulla-node",
  "rand_core",
  "rpassword",
+ "serde",
+ "serde_json",
  "sled",
  "zeroize",
 ]

@@ -3,6 +3,7 @@
 #![deny(clippy::expect_used)]
 
 mod mempool;
+mod rpc;
 
 use clap::Parser;
 use std::env;
@@ -102,6 +103,12 @@ fn main() {
     // Build ChainStore once bodies are reconciled.
     let chain = ChainStore::load_or_init_with_db((*chain_db).clone(), genesis.clone()).expect("valid genesis/db");
     let chain = Arc::new(Mutex::new(chain));
+    let rpc_listen = env::var("NULLA_RPC_LISTEN")
+        .ok()
+        .unwrap_or_else(|| "127.0.0.1:18445".to_string());
+    let rpc_auth = env::var("NULLA_RPC_AUTH_TOKEN").ok();
+    let _ = rpc::serve_rpc(&rpc_listen, rpc_auth, Arc::clone(&chain), Arc::clone(&mempool));
+    println!("RPC listening on {rpc_listen}");
     {
         let chain_for_cb = Arc::clone(&chain);
         p2p.lock().expect("p2p").set_block_callback(move |block| {

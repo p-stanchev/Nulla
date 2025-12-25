@@ -10,13 +10,13 @@ Nulla is a privacy-first Proof-of-Work blockchain written in Rust. It targets pr
 
 ## Status
 
-- Consensus locked: genesis, tail emission v1, MTP(11) with +/-2h drift, difficulty clamp, PoW vectors, transparent P2PKH txs now in consensus (coinbase pays a transparent output).
+- Consensus locked: genesis, tail emission v1, MTP(11) with +/-2h drift, difficulty clamp, PoW vectors, transparent P2PKH txs (coinbase pays a transparent output).
 - Persisted ChainStore: sled-backed headers/blocks/index/UTXOs + best tip; restart-safe with body reconciliation.
 - P2P v0: TCP header-first sync (version/verack, ping/pong, getheaders/headers), heaviest-work selection.
 - Block download: best-chain-only path with strict header<->block checks.
 - Policy layer: reorg depth cap, peer scoring/bans, basic rate limits (non-consensus).
-- Wallet: transparent scaffold landed (keygen/address/encrypted storage/scan CLI); sending/relay next.
-- Mempool: transparent tx acceptance wired to ChainStore UTXO view (node-only API for now).
+- Wallet: transparent CLI (keygen/address/encrypted storage/rescan/balance/list/send) via node RPC.
+- Mempool: transparent tx acceptance wired to ChainStore UTXO view; miner includes mempool txs.
 
 ---
 
@@ -44,18 +44,26 @@ Each crate owns a single responsibility; there are no circular dependencies.
 
 ---
 
-## Run
+## Getting Started (beginner friendly)
 
-Env:
-- CLI flags (primary): `--listen` (default `0.0.0.0:18444`), `--peers`, `--db` (default `./nulla.chain.db`), `--reorg-cap` (default `100`, policy-only).
-- Env fallbacks: `NULLA_LISTEN`, `NULLA_PEERS`, `NULLA_DB`, `NULLA_REORG_CAP`. Resolution order: flag > env > default.
-- Chain DBs live in the working directory by default: `nulla.chain.db`, plus `nulla.p2p.db` for P2P metadata.
-- Mining address: `--miner-address` (Base58Check, prefix 0x35) or `NULLA_MINER_ADDRESS`. If unset, rewards burn to a null hash.
-- Wallet rescan expects exclusive access to the chain DB (stop the node during a full rescan, or run against a snapshot).
+Node
+- Start a node (mining to your address):  
+  `cargo run -p nulla-node -- --miner-address <Base58 addr>`
+- Defaults: listen `0.0.0.0:18444`, db `./nulla.chain.db`, reorg-cap `100`.  
+  Env fallbacks: `NULLA_LISTEN`, `NULLA_PEERS`, `NULLA_DB`, `NULLA_REORG_CAP`, `NULLA_MINER_ADDRESS`.
+- RPC (local only by default): `NULLA_RPC_LISTEN=127.0.0.1:18445` (default), `NULLA_RPC_AUTH_TOKEN` optional.
 
-Examples (two local nodes):
+Wallet (talks to node via RPC; does **not** open the node DB)
+- Init: `cargo run -p nulla-wallet -- init`
+- Show address: `cargo run -p nulla-wallet -- addr`
+- Rescan (node must be running): `cargo run -p nulla-wallet -- rescan`
+- Check balance: `cargo run -p nulla-wallet -- balance`
+- Send: `cargo run -p nulla-wallet -- send --to <addr> --amount <atoms> --fee <atoms>`
+- Wallet flags: `--wallet-db` (default `nulla.wallet.db`), `--rpc` (default `127.0.0.1:18445`), `--rpc-auth-token` (if node requires it).
+
+Two-node example (header sync)
 ```bash
-# Node A (listen on default)
+# Node A (default listen)
 cargo run -p nulla-node
 
 # Node B (custom port, connect to A)
@@ -66,13 +74,17 @@ cargo run -p nulla-node
 
 ---
 
-## Testnet
+## Testnet Flow (quick checklist)
 
-- Two nodes: use the run examples above; expose `--listen 0.0.0.0:18444` on at least one node so others can dial.
-- Connecting peers: pass `--peers ip:port,...` (or `NULLA_PEERS`) to seed connections.
-- Mining (solo, devnet loop): run `cargo run -p nulla-node` to produce deterministic blocks; PoW remains consensus-valid (dev-pow is test-only).
-- Wallet status: transparent wallet exists (init/addr/balance/list/rescan/send). Mining produces transparent UTXOs the wallet can see; tx relay to peers is still minimal.
-- Known limitations: no zk yet, no explorers, no Stratum; focus is on sync/restart correctness and fork handling.
+1) Start node with your miner address.  
+2) Wallet `init` → `rescan` (node running).  
+3) Mine a block → wallet balance increases (coinbase UTXO is transparent).  
+4) Wallet `send` → mine again → tx confirmed.  
+5) Repeat; restart nodes to confirm persistence.
+
+Notes:
+- Tx relay is local-only for now (no P2P tx gossip yet).
+- No zk, no pools, no explorers, no Stratum yet.
 
 ---
 
@@ -89,9 +101,9 @@ cargo test --workspace --features dev-pow
 
 ## Roadmap (next)
 
-1) Wire wallet sending/signing and node mempool/tx relay to complete wallet -> node -> block roundtrip.
-2) Tag `v0.1.0-testnet` once tx relay is stable.
-3) Begin zk primitives only after wallet + relay are solid.
+1) Add P2P tx relay (local RPC already exists).
+2) Tag `v0.1.0-testnet`.
+3) Explore zk/shielded transfers only after wallet + relay are solid.
 
 ---
 
