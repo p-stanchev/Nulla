@@ -40,6 +40,12 @@ struct Config {
     /// Peers to dial, comma separated host:port list
     #[arg(long = "peers")]
     peers: Option<String>,
+    /// Seed peers (fallback if no explicit peers), comma separated host:port list
+    #[arg(long = "seeds")]
+    seeds: Option<String>,
+    /// Disable mining (follower/seed mode)
+    #[arg(long = "no-mine")]
+    no_mine: bool,
     /// Path to ChainDB (sled)
     #[arg(long = "db")]
     db: Option<PathBuf>,
@@ -94,7 +100,13 @@ fn main() {
 
     // Compute best chain and missing bodies, then request them on connect.
     let (_best_tip, best_chain, missing) = compute_best_chain_and_missing(&chain_db);
-    for peer in cfg.peers {
+    // Prefer explicit peers; if none, fall back to seeds.
+    let connect_list = if cfg.peers.is_empty() {
+        cfg.seeds.clone()
+    } else {
+        cfg.peers.clone()
+    };
+    for peer in connect_list {
         let _ = P2pEngine::connect_and_sync(Arc::clone(&p2p), peer, missing.clone());
     }
     // Poll for missing bodies to arrive.
@@ -105,7 +117,7 @@ fn main() {
     let chain = Arc::new(Mutex::new(chain));
     let rpc_listen = env::var("NULLA_RPC_LISTEN")
         .ok()
-        .unwrap_or_else(|| "127.0.0.1:18445".to_string());
+        .unwrap_or_else(|| "127.0.0.1:27445".to_string());
     let rpc_auth = env::var("NULLA_RPC_AUTH_TOKEN").ok();
     {
         let chain_for_cb = Arc::clone(&chain);
@@ -150,9 +162,20 @@ fn main() {
     println!("RPC listening on {rpc_listen}");
 
     // -----------------
-    // Main mining loop
+    // Main mining loop (gated on sync/mining_enabled)
     // -----------------
-    for height in 1u64.. {
+    let mut height = 1u64;
+    loop {
+        let best_height = { chain.lock().expect("chain lock").best_entry().height };
+        let peer_height = { p2p.lock().expect("p2p").best_peer_height() };
+        let syncing = best_height + 1 < peer_height;
+
+        // Hold mining and mempool work until synced.
+        if syncing || !cfg.mining_enabled {
+            thread::sleep(Duration::from_millis(50));
+            continue;
+        }
+
         // Drain any locally submitted transactions (file dropbox).
         drain_local_submissions(&cfg.db_path, &chain, &mempool);
 
@@ -216,6 +239,7 @@ fn main() {
         );
 
         thread::sleep(Duration::from_secs(1));
+        height = height.saturating_add(1);
     }
 }
 
@@ -490,7 +514,7 @@ fn resolve_config(cli: Config) -> ResolvedConfig {
     let listen = cli
         .listen
         .or_else(|| env::var("NULLA_LISTEN").ok())
-        .unwrap_or_else(|| "0.0.0.0:18444".to_string())
+        .unwrap_or_else(|| "0.0.0.0:27444".to_string())
         .parse()
         .expect("invalid listen address");
 
@@ -499,6 +523,16 @@ fn resolve_config(cli: Config) -> ResolvedConfig {
         .or_else(|| env::var("NULLA_PEERS").ok())
         .unwrap_or_default();
     let peers = peers_raw
+        .split(',')
+        .filter(|s| !s.trim().is_empty())
+        .filter_map(|s| s.trim().parse().ok())
+        .collect::<Vec<_>>();
+
+    let seeds_raw = cli
+        .seeds
+        .or_else(|| env::var("NULLA_SEEDS").ok())
+        .unwrap_or_default();
+    let seeds = seeds_raw
         .split(',')
         .filter(|s| !s.trim().is_empty())
         .filter_map(|s| s.trim().parse().ok())
@@ -528,22 +562,26 @@ fn resolve_config(cli: Config) -> ResolvedConfig {
     ResolvedConfig {
         listen,
         peers,
+        seeds,
         db_path,
         p2p_db_path,
         reorg_cap,
         miner_pubkey_hash,
         miner_addr_b58,
+        mining_enabled: !cli.no_mine && env::var("NULLA_NO_MINE").is_err(),
     }
 }
 
 struct ResolvedConfig {
     listen: SocketAddr,
     peers: Vec<SocketAddr>,
+    seeds: Vec<SocketAddr>,
     db_path: PathBuf,
     p2p_db_path: PathBuf,
     reorg_cap: u64,
     miner_pubkey_hash: [u8; 20],
     miner_addr_b58: String,
+    mining_enabled: bool,
 }
 
 fn compute_best_chain_and_missing(db: &ChainDb) -> (Hash32, Vec<Hash32>, Vec<Hash32>) {

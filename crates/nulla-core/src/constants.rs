@@ -53,11 +53,11 @@ pub const DS_COMMITMENT: &[u8] = b"NULLA::COMMITMENT::V0";
 /// Prevents cross-domain hash collisions.
 pub const DS_NULLIFIER: &[u8] = b"NULLA::NULLIFIER::V0";
 
-/// Chain identity string (devnet).
-pub const CHAIN_ID: &str = "nulla-devnet";
+/// Chain identity string (mainnet). Use numeric "0" for on-wire messages.
+pub const CHAIN_ID: &str = "0";
 
-/// Network magic bytes (devnet).
-pub const NETWORK_MAGIC: [u8; 4] = *b"NDVT";
+/// Network magic bytes (mainnet).
+pub const NETWORK_MAGIC: [u8; 4] = *b"NUL0";
 
 /// Address prefix (devnet placeholder; not yet used in wallet).
 pub const ADDRESS_PREFIX: u8 = 0x35;

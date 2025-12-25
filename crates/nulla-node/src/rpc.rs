@@ -12,6 +12,16 @@ use crate::mempool::Mempool;
 use nulla_p2p::net::P2pEngine;
 use crate::ChainStore;
 
+fn parse_pubkey_hash(v: &Value) -> Result<[u8; 20], String> {
+    if let Some(addr) = v.get("address").and_then(|a| a.as_str()) {
+        decode_address(addr)
+    } else if let Some(pk_hex) = v.get("pubkey_hash").and_then(|p| p.as_str()) {
+        <[u8; 20]>::from_hex(pk_hex).map_err(|_| "bad pubkey_hash".to_string())
+    } else {
+        Err("missing address/pubkey_hash".into())
+    }
+}
+
 pub fn serve_rpc(
     addr: &str,
     auth_token: Option<String>,
@@ -88,13 +98,9 @@ fn handle_request(
             })
         }
         "get_utxos" => {
-            let pk_hex = match v.get("pubkey_hash").and_then(|p| p.as_str()) {
-                Some(p) => p,
-                None => return json!({"ok": false, "error": "missing pubkey_hash"}),
-            };
-            let pk_bytes = match <[u8;20]>::from_hex(pk_hex) {
+            let pk_bytes = match parse_pubkey_hash(&v) {
                 Ok(b) => b,
-                Err(_) => return json!({"ok": false, "error": "bad pubkey_hash"}),
+                Err(e) => return json!({"ok": false, "error": e}),
             };
             let chain = chain.lock().expect("chain");
             match chain.utxos_for_pubkey_hash(pk_bytes) {
@@ -111,6 +117,20 @@ fn handle_request(
                         })
                         .collect();
                     json!({"ok": true, "utxos": utxos})
+                }
+                Err(e) => json!({"ok": false, "error": e}),
+            }
+        }
+        "get_balance" => {
+            let pk_bytes = match parse_pubkey_hash(&v) {
+                Ok(b) => b,
+                Err(e) => return json!({"ok": false, "error": e}),
+            };
+            let chain = chain.lock().expect("chain");
+            match chain.utxos_for_pubkey_hash(pk_bytes) {
+                Ok(list) => {
+                    let bal: u64 = list.iter().map(|(_, rec)| rec.value).sum();
+                    json!({"ok": true, "balance": bal})
                 }
                 Err(e) => json!({"ok": false, "error": e}),
             }

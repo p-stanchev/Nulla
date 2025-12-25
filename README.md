@@ -11,12 +11,13 @@ Nulla is a privacy-first Proof-of-Work blockchain written in Rust. It targets pr
 ## Status
 
 - Consensus locked: genesis, tail emission v1, MTP(11) with +/-2h drift, difficulty clamp, PoW vectors, transparent P2PKH txs (coinbase pays a transparent output).
+- Chain identity locked: chain ID `0`, magic `NUL0`, address prefix `0x35`.
 - Persisted ChainStore: sled-backed headers/blocks/index/UTXOs + best tip; restart-safe with body reconciliation.
 - P2P v0: TCP header-first sync (version/verack, ping/pong, getheaders/headers), heaviest-work selection.
 - Block download: best-chain-only path with strict header<->block checks.
 - Policy layer: reorg depth cap, peer scoring/bans, basic rate limits (non-consensus).
 - Wallet: transparent CLI (keygen/address/encrypted storage/rescan/balance/list/send) via node RPC.
-- Mempool: transparent tx acceptance wired to ChainStore UTXO view; miner includes mempool txs.
+- Mempool/Fees: transparent tx acceptance wired to ChainStore UTXO view; base fee enforced; miner includes mempool txs.
 
 ---
 
@@ -50,9 +51,13 @@ Each crate owns a single responsibility; there are no circular dependencies.
 Node (must be running for wallet operations)
 - Start + mine to your address (PowerShell/cmd):  
   `cargo run -p nulla-node -- --miner-address <Base58 addr>`
-- Defaults: listen `0.0.0.0:18444`, db `./nulla.chain.db`, reorg-cap `100`.  
-  Env fallbacks: `NULLA_LISTEN`, `NULLA_PEERS`, `NULLA_DB`, `NULLA_REORG_CAP`, `NULLA_MINER_ADDRESS`.
-- RPC: `NULLA_RPC_LISTEN=127.0.0.1:18445` (default), `NULLA_RPC_AUTH_TOKEN` optional.
+- Defaults (mainnet-ready): listen `0.0.0.0:27444`, db `./nulla.chain.db`, reorg-cap `100`.  
+  Env fallbacks: `NULLA_LISTEN`, `NULLA_PEERS`, `NULLA_SEEDS`, `NULLA_DB`, `NULLA_REORG_CAP`, `NULLA_MINER_ADDRESS`, `NULLA_NO_MINE`.
+- RPC: `NULLA_RPC_LISTEN=127.0.0.1:27445` (default), `NULLA_RPC_AUTH_TOKEN` optional.
+- Seeds: `NULLA_SEEDS` (comma-separated `host:port`), used if no explicit `--peers` provided.
+- Disable mining (follower/seed mode): `--no-mine` or env `NULLA_NO_MINE` set.
+- Mining waits for sync: mining/mempool work stays off until local height catches the best peer height.
+- Mining waits for sync: mining/mempool work stays off until local height catches the best peer height.
 
 Wallet (RPC-only; does **not** open the node DB)
 - Init: `cargo run -p nulla-wallet -- init`
@@ -76,6 +81,7 @@ cargo run -p nulla-node
 ```
 
 Multi-node walkthrough: see `docs/multinode.md` for full P2P+wallet steps.
+Mainnet prep notes: see `docs/mainnet-plan.md` (chain ID 0, policy, launch checklist).
 
 ---
 

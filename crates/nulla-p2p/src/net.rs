@@ -368,6 +368,7 @@ struct PeerState {
     version_seen: bool,
     verack_seen: bool,
     disconnected: bool,
+    height: u64,
     score: u32,
 }
 
@@ -437,6 +438,14 @@ impl P2pEngine {
 
     pub fn best_entry(&self) -> &HeaderEntry {
         self.store.best_entry()
+    }
+
+    pub fn best_peer_height(&self) -> u64 {
+        self.peers
+            .values()
+            .map(|p| p.height)
+            .max()
+            .unwrap_or(self.store.best_entry().height)
     }
 
     pub fn next_peer_id(&mut self) -> u64 {
@@ -524,6 +533,9 @@ impl P2pEngine {
             Message::Version(_) => {
                 let peer = self.peers.entry(peer_id).or_default();
                 peer.version_seen = true;
+                if let Message::Version(v) = &msg {
+                    peer.height = v.height;
+                }
                 let mut out = vec![(peer_id, Message::Verack)];
                 out.push((peer_id, Message::Version(Version { height: self.store.best_entry().height })));
                 Ok(out)
@@ -557,6 +569,9 @@ impl P2pEngine {
                 let mut out = Vec::new();
                 for h in self.store.needs_blocks_on_best(16) {
                     out.push((peer_id, Message::GetBlock(h)));
+                }
+                if let Some(peer) = self.peers.get_mut(&peer_id) {
+                    peer.height = peer.height.max(self.store.best_entry().height);
                 }
                 Ok(out)
             }
