@@ -10,20 +10,20 @@ Nulla is a privacy-first Proof-of-Work blockchain written in Rust. It targets pr
 
 ## Status
 
-- Consensus locked: genesis, tail emission v1, MTP(11) with +/-2h drift, difficulty clamp, PoW vectors.
-- Persisted ChainStore: sled-backed headers/blocks/index + best tip; restart-safe with body reconciliation.
+- Consensus locked: genesis, tail emission v1, MTP(11) with +/-2h drift, difficulty clamp, PoW vectors, transparent P2PKH txs now in consensus.
+- Persisted ChainStore: sled-backed headers/blocks/index/UTXOs + best tip; restart-safe with body reconciliation.
 - P2P v0: TCP header-first sync (version/verack, ping/pong, getheaders/headers), heaviest-work selection.
 - Block download: best-chain-only path with strict header<->block checks.
 - Policy layer: reorg depth cap, peer scoring/bans, basic rate limits (non-consensus).
 - Wallet: transparent scaffold landed (keygen/address/encrypted storage/scan CLI); sending/relay next.
-- Mempool: transparent tx acceptance (node-only API) in progress.
+- Mempool: transparent tx acceptance wired to ChainStore UTXO view (node-only API for now).
 
 ---
 
 ## What Works Today
 
 - **Consensus:** BLAKE3-based PoW (v0), compact difficulty, median-time-past(11), tail emission, hardcoded genesis, multi-height PoW serialization vectors.
-- **ChainStore / ChainDB:** sled-backed storage for headers, blocks, index entries `{hash,height,prev,bits,time,cumulative_work}`, and best tip with recovery coverage.
+- **ChainStore / ChainDB:** sled-backed storage for headers, blocks, index entries `{hash,height,prev,bits,time,cumulative_work}`, UTXO index, and best tip with recovery coverage.
 - **Fork Choice:** heaviest cumulative work with deterministic tie-breaker; difficulty-drop clamp enforced everywhere; single validation entrypoint (no bypass).
 - **P2P v0 (header-first):** TCP transport, locators, fork handling, restart safety. Dev-only easy PoW lives behind the `dev-pow` feature for tests/vector generation.
 - **Node:** devnet miner loop wired through ChainStore and P2pEngine; block download restricted to the best chain.

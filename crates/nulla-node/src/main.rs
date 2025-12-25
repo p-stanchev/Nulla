@@ -22,7 +22,7 @@ use nulla_core::{
 };
 use nulla_p2p::net::{Message, P2pEngine, Policy};
 use nulla_state::{block_subsidy, LedgerState};
-use mempool::{Mempool, SubmitError as MempoolSubmitError, Transaction as MempoolTx};
+use mempool::{Mempool, SubmitError as MempoolSubmitError};
 
 /// Extremely easy difficulty for devnet.
 const DEVNET_BITS: u32 = GENESIS_BITS;
@@ -289,6 +289,8 @@ fn coinbase_tx(height: u64, fees: Amount, subsidy: Amount) -> Transaction {
     Transaction {
         version: PROTOCOL_VERSION,
         kind: TransactionKind::Coinbase,
+        transparent_inputs: vec![],
+        transparent_outputs: vec![],
         anchor_root: Hash32::zero(),
         nullifiers: vec![],
         outputs: vec![coinbase_commitment(height)],
@@ -330,7 +332,7 @@ fn block_hash(block: &Block) -> Hash32 {
 fn submit_tx_to_node(
     chain: &Arc<Mutex<ChainStore>>,
     mempool: &Arc<Mutex<Mempool>>,
-    tx: MempoolTx,
+    tx: Transaction,
 ) -> Result<Hash32, MempoolSubmitError> {
     let chain_guard = chain.lock().expect("chain lock");
     let mut pool = mempool.lock().expect("mempool lock");
@@ -435,6 +437,27 @@ mod tests {
         let hash = block_hash(&genesis);
         let expected = Hash32::from(GENESIS_HASH_BYTES);
         assert_eq!(hash, expected, "update GENESIS_HASH_BYTES");
+    }
+
+    #[test]
+    #[cfg(feature = "dev-pow")]
+    fn print_genesis_hash_for_debug() {
+        let genesis = build_genesis();
+        let hash = block_hash(&genesis);
+        println!("genesis_hash={hash:?}");
+    }
+
+    #[test]
+    #[cfg(not(feature = "dev-pow"))]
+    fn print_genesis_hash_and_nonce_for_debug() {
+        let genesis = build_genesis();
+        let hash = block_hash(&genesis);
+        println!(
+            "genesis_hash={hash:?} nonce={} tx_merkle_root={:?} commitment_root={:?}",
+            genesis.header.nonce,
+            genesis.header.tx_merkle_root,
+            genesis.header.commitment_root
+        );
     }
 
     #[test]

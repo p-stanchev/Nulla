@@ -150,6 +150,8 @@ mod tests {
         Transaction {
             version: PROTOCOL_VERSION,
             kind: TransactionKind::Coinbase,
+            transparent_inputs: vec![],
+            transparent_outputs: vec![],
             anchor_root: Hash32::zero(),
             nullifiers: vec![],
             outputs: vec![Commitment::zero()],

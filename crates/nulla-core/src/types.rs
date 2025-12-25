@@ -103,6 +103,22 @@ pub type BlockHash = Hash32;
 /// Transaction identifier type.
 pub type TxId = Hash32;
 
+/// Reference to a specific output of a transaction.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, BorshSerialize, BorshDeserialize)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct OutPoint {
+    /// Referenced transaction id.
+    pub txid: TxId,
+    /// Output index within the referenced transaction.
+    pub vout: u32,
+}
+
+impl fmt::Debug for OutPoint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "OutPoint({}:{})", self.txid, self.vout)
+    }
+}
+
 /// Commitment to a private note (UTXO).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, BorshSerialize, BorshDeserialize)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
@@ -272,6 +288,10 @@ pub struct Transaction {
     pub version: u16,
     /// Transaction kind.
     pub kind: TransactionKind,
+    /// Transparent inputs (P2PKH-only v0).
+    pub transparent_inputs: Vec<TransparentInput>,
+    /// Transparent outputs (P2PKH-only v0).
+    pub transparent_outputs: Vec<TransparentOutput>,
 
     /// Commitment tree root this transaction is anchored to (Regular only).
     pub anchor_root: Hash32,
@@ -298,6 +318,28 @@ pub struct Transaction {
     pub memo: Vec<u8>,
 }
 
+/// Transparent input (P2PKH-only v0).
+#[derive(Clone, PartialEq, Eq, Debug, BorshSerialize, BorshDeserialize)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct TransparentInput {
+    /// OutPoint being spent.
+    pub prevout: OutPoint,
+    /// DER-encoded secp256k1 signature over the transaction sighash.
+    pub sig: Vec<u8>,
+    /// Compressed secp256k1 public key.
+    pub pubkey: Vec<u8>, // compressed secp256k1
+}
+
+/// Transparent output (P2PKH-only v0).
+#[derive(Clone, PartialEq, Eq, Debug, BorshSerialize, BorshDeserialize)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct TransparentOutput {
+    /// Amount in atoms.
+    pub value: Amount,
+    /// BLAKE3-160(pubkey) payment hash.
+    pub pubkey_hash: [u8; 20],
+}
+
 impl Transaction {
     /// Performs basic structural validation.
     pub fn validate_sanity(&self) -> Result<(), CoreError> {
@@ -307,6 +349,11 @@ impl Transaction {
 
         match self.kind {
             TransactionKind::Coinbase => {
+                if !self.transparent_inputs.is_empty() {
+                    return Err(CoreError::InvalidValue(
+                        "coinbase must not have transparent inputs",
+                    ));
+                }
                 if !self.nullifiers.is_empty() {
                     return Err(CoreError::InvalidValue("coinbase must have no inputs"));
                 }
@@ -316,25 +363,28 @@ impl Transaction {
                 if self.fee != Amount::zero() {
                     return Err(CoreError::InvalidValue("coinbase fee must be zero"));
                 }
-                if self.outputs.is_empty() {
+                let total_outputs = self.outputs.len() + self.transparent_outputs.len();
+                if total_outputs == 0 {
                     return Err(CoreError::InvalidValue("coinbase must have >= 1 output"));
                 }
-                if self.outputs.len() > MAX_OUTPUTS_PER_TX {
+                if total_outputs > MAX_OUTPUTS_PER_TX {
                     return Err(CoreError::InvalidValue("too many outputs"));
                 }
                 Ok(())
             }
             TransactionKind::Regular => {
-                if self.nullifiers.is_empty() {
+                let total_inputs = self.nullifiers.len() + self.transparent_inputs.len();
+                if total_inputs == 0 {
                     return Err(CoreError::InvalidValue("transaction has no inputs"));
                 }
-                if self.nullifiers.len() > MAX_INPUTS_PER_TX {
+                if total_inputs > MAX_INPUTS_PER_TX {
                     return Err(CoreError::InvalidValue("too many inputs"));
                 }
-                if self.outputs.is_empty() {
+                let total_outputs = self.outputs.len() + self.transparent_outputs.len();
+                if total_outputs == 0 {
                     return Err(CoreError::InvalidValue("transaction has no outputs"));
                 }
-                if self.outputs.len() > MAX_OUTPUTS_PER_TX {
+                if total_outputs > MAX_OUTPUTS_PER_TX {
                     return Err(CoreError::InvalidValue("too many outputs"));
                 }
                 if self.claimed_subsidy != Amount::zero() || self.claimed_fees != Amount::zero() {

@@ -673,20 +673,18 @@ mod tests {
 
     fn genesis_header() -> BlockHeader {
         let prev = Hash32::zero();
-        let tx_merkle_root = Hash32(hex_literal::hex!(
-            "54e857af9f5afc622a84bce9e4796a2a5c982f3d503a7a40fa8e8a2687629f88"
-        ));
-        let commitment_root = Hash32(hex_literal::hex!(
-            "300eb2dc8d3001271ea0f2fcada9387e7f5817533d863e5a45e5bd8e5f2ca09e"
-        ));
+        let tx_merkle_root =
+            Hash32(hex_literal::hex!("8c0c4a7bd5ed210d5bbd47724e07739252e283ffb352aaa5a238100f53e5ade3"));
+        let commitment_root =
+            Hash32(hex_literal::hex!("300eb2dc8d3001271ea0f2fcada9387e7f5817533d863e5a45e5bd8e5f2ca09e"));
         BlockHeader {
-            version: 0,
+            version: PROTOCOL_VERSION,
             prev,
             tx_merkle_root,
             commitment_root,
             timestamp: 1_700_000_000,
             bits: 0x207f_ffff,
-            nonce: 2,
+            nonce: 6,
         }
     }
 
@@ -694,6 +692,8 @@ mod tests {
         let tx = Transaction {
             version: PROTOCOL_VERSION,
             kind: TransactionKind::Coinbase,
+            transparent_inputs: vec![],
+            transparent_outputs: vec![],
             anchor_root: Hash32::zero(),
             nullifiers: vec![],
             outputs: vec![Commitment::zero()],

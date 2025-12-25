@@ -1,9 +1,9 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use borsh::{to_vec, BorshDeserialize, BorshSerialize};
 use nulla_consensus::{tip_is_better, validate_block_with_prev_bits, work_from_bits};
-use nulla_core::{block_header_hash, Block, Hash32, GENESIS_HASH_BYTES};
+use nulla_core::{block_header_hash, txid, Amount, Block, Hash32, OutPoint, TransactionKind, GENESIS_HASH_BYTES};
 use nulla_state::LedgerState;
 use num_bigint::BigUint;
 use sled::transaction::{Transactional, TransactionResult};
@@ -14,6 +14,7 @@ use sled::Error as SledError;
 const TREE_BLOCKS: &str = "blocks";
 const TREE_INDEX: &str = "index";
 const TREE_META: &str = "meta";
+const TREE_UTXOS: &str = "utxos";
 const KEY_BEST: &[u8] = b"best";
 
 #[derive(Clone, BorshSerialize, BorshDeserialize)]
@@ -25,12 +26,20 @@ pub struct IndexRecord {
     pub cumulative_work: Vec<u8>, // BigUint BE bytes
 }
 
+#[derive(Clone, BorshSerialize, BorshDeserialize)]
+pub struct UtxoRecord {
+    pub value: u64,
+    pub pubkey_hash: [u8; 20],
+    pub height: u64,
+}
+
 #[allow(dead_code)]
 pub struct ChainDb {
     db: sled::Db,
     blocks: sled::Tree,
     index: sled::Tree,
     meta: sled::Tree,
+    utxos: sled::Tree,
 }
 
 impl Clone for ChainDb {
@@ -40,6 +49,7 @@ impl Clone for ChainDb {
             blocks: self.blocks.clone(),
             index: self.index.clone(),
             meta: self.meta.clone(),
+            utxos: self.utxos.clone(),
         }
     }
 }
@@ -51,7 +61,8 @@ impl ChainDb {
         let blocks = db.open_tree(TREE_BLOCKS).map_err(|e| e.to_string())?;
         let index = db.open_tree(TREE_INDEX).map_err(|e| e.to_string())?;
         let meta = db.open_tree(TREE_META).map_err(|e| e.to_string())?;
-        Ok(Self { db, blocks, index, meta })
+        let utxos = db.open_tree(TREE_UTXOS).map_err(|e| e.to_string())?;
+        Ok(Self { db, blocks, index, meta, utxos })
     }
 
     pub fn get_block(&self, hash: &Hash32) -> Result<Option<Block>, String> {
@@ -76,6 +87,34 @@ impl ChainDb {
         } else {
             Ok(None)
         }
+    }
+
+    pub fn get_utxo(&self, op: &nulla_core::OutPoint) -> Result<Option<UtxoRecord>, String> {
+        let key = outpoint_key(op);
+        if let Some(bytes) = self.utxos.get(key).map_err(|e| e.to_string())? {
+            let rec = UtxoRecord::try_from_slice(&bytes).map_err(|e| e.to_string())?;
+            Ok(Some(rec))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn put_utxo(&self, op: &nulla_core::OutPoint, rec: &UtxoRecord) -> Result<(), String> {
+        let key = outpoint_key(op);
+        let bytes = to_vec(rec).map_err(|e| e.to_string())?;
+        self.utxos.insert(key, bytes).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn del_utxo(&self, op: &nulla_core::OutPoint) -> Result<(), String> {
+        let key = outpoint_key(op);
+        self.utxos.remove(key).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn clear_utxos(&self) -> Result<(), String> {
+        self.utxos.clear().map_err(|e| e.to_string())?;
+        Ok(())
     }
 
     pub fn best_tip(&self) -> Result<Option<Hash32>, String> {
@@ -217,6 +256,7 @@ pub struct ChainStore {
     db: ChainDb,
 }
 
+#[derive(Clone)]
 pub struct ChainEntry {
     pub block: Block,
     pub height: u64,
@@ -280,7 +320,9 @@ impl ChainStore {
             return Err("no tip found after load".into());
         };
 
-        Ok(Self { entries, best: best_hash, db })
+        let store = Self { entries, best: best_hash, db };
+        store.rebuild_utxos(best_hash)?;
+        Ok(store)
     }
 
     pub fn best_hash(&self) -> Hash32 {
@@ -297,6 +339,10 @@ impl ChainStore {
 
     pub fn entry(&self, hash: &Hash32) -> Option<&ChainEntry> {
         self.entries.get(hash)
+    }
+
+    pub fn utxo_lookup(&self, out: &OutPoint) -> Option<UtxoRecord> {
+        self.db.get_utxo(out).ok().flatten()
     }
 
     #[cfg(feature = "dev-pow")]
@@ -319,18 +365,7 @@ impl ChainStore {
     }
 
     pub fn active_chain_hashes(&self, tip: Hash32) -> Result<Vec<Hash32>, String> {
-        let mut out = Vec::new();
-        let mut cursor = tip;
-        loop {
-            out.push(cursor);
-            let entry = self.entries.get(&cursor).ok_or("missing entry")?;
-            if entry.block.header.prev == Hash32::zero() {
-                break;
-            }
-            cursor = entry.block.header.prev;
-        }
-        out.reverse();
-        Ok(out)
+        active_chain_hashes_in(&self.entries, tip)
     }
 
     pub fn rebuild_state(&self) -> LedgerState {
@@ -347,6 +382,96 @@ impl ChainStore {
                 .expect("replay must succeed");
         }
         state
+    }
+
+    fn persist_utxos(&self, utxos: &HashMap<OutPoint, UtxoRecord>) -> Result<(), String> {
+        self.db.clear_utxos()?;
+        for (op, rec) in utxos {
+            self.db.put_utxo(op, rec)?;
+        }
+        Ok(())
+    }
+
+    fn rebuild_utxos(&self, tip: Hash32) -> Result<(), String> {
+        let utxos = Self::compute_utxos_for_tip(&self.entries, tip)?;
+        self.persist_utxos(&utxos)
+    }
+
+    fn compute_utxos_for_tip(
+        entries: &HashMap<Hash32, ChainEntry>,
+        tip: Hash32,
+    ) -> Result<HashMap<OutPoint, UtxoRecord>, String> {
+        let mut utxos: HashMap<OutPoint, UtxoRecord> = HashMap::new();
+        let chain = active_chain_hashes_in(entries, tip)?;
+
+        for (height, hash) in chain.into_iter().enumerate() {
+            let entry = entries.get(&hash).ok_or("missing entry")?;
+            let block_height = height as u64;
+            let mut fee_sum = Amount::zero();
+
+            for tx in entry.block.txs.iter() {
+                let txid = txid(tx).map_err(|e| e.to_string())?;
+
+                // Basic per-tx checks (structural already enforced elsewhere).
+                let mut seen_inputs = HashSet::new();
+                let mut input_total: u64 = 0;
+
+                for inp in &tx.transparent_inputs {
+                    if !seen_inputs.insert(inp.prevout) {
+                        return Err("duplicate transparent input".into());
+                    }
+                    let prev = utxos
+                        .remove(&inp.prevout)
+                        .ok_or("transparent input not found")?;
+                    input_total = input_total
+                        .checked_add(prev.value)
+                        .ok_or("input overflow")?;
+                }
+
+                let mut output_total: u64 = 0;
+                for (vout, out) in tx.transparent_outputs.iter().enumerate() {
+                    output_total = output_total
+                        .checked_add(out.value.atoms())
+                        .ok_or("output overflow")?;
+                    let op = OutPoint {
+                        txid,
+                        vout: vout as u32,
+                    };
+                    let rec = UtxoRecord {
+                        value: out.value.atoms(),
+                        pubkey_hash: out.pubkey_hash,
+                        height: block_height,
+                    };
+                    if utxos.insert(op, rec).is_some() {
+                        return Err("duplicate outpoint insertion".into());
+                    }
+                }
+
+                if tx.kind == TransactionKind::Regular {
+                    let fee_atoms = tx.fee.atoms();
+                    let required = output_total
+                        .checked_add(fee_atoms)
+                        .ok_or("fee overflow")?;
+                    if input_total < required {
+                        return Err("insufficient transparent input value".into());
+                    }
+                    fee_sum = fee_sum.checked_add(tx.fee).map_err(|e| format!("{e:?}"))?;
+                } else {
+                    if !tx.transparent_inputs.is_empty() {
+                        return Err("coinbase may not have transparent inputs".into());
+                    }
+                }
+            }
+
+            // coinbase fee claim check: tx[0] is coinbase by construction.
+            if let Some(coinbase) = entry.block.txs.first() {
+                if coinbase.claimed_fees != fee_sum {
+                    return Err("coinbase claimed_fees mismatch".into());
+                }
+            }
+        }
+
+        Ok(utxos)
     }
 
     pub fn preview_commitment_root(
@@ -390,17 +515,26 @@ impl ChainStore {
         let best_before = self.best_entry();
         let should_update = tip_is_better(&cum_work, &hash, &best_before.cumulative_work, &self.best);
 
-        self.db
-            .upsert_block(hash, &block, &idx, should_update.then_some(hash))?;
-
         let entry = ChainEntry {
             block,
             height,
             cumulative_work: cum_work,
         };
-        self.entries.insert(hash, entry);
+
         if should_update {
+            let mut preview_entries = self.entries.clone();
+            preview_entries.insert(hash, entry.clone());
+            let utxos = Self::compute_utxos_for_tip(&preview_entries, hash)?;
+
+            self.db
+                .upsert_block(hash, &entry.block, &idx, Some(hash))?;
+
+            self.entries.insert(hash, entry);
             self.best = hash;
+            self.persist_utxos(&utxos)?;
+        } else {
+            self.db.upsert_block(hash, &entry.block, &idx, None)?;
+            self.entries.insert(hash, entry);
         }
         Ok(())
     }
@@ -414,6 +548,31 @@ fn hash32_from_bytes(bytes: &[u8; 32]) -> Hash32 {
     let mut arr = [0u8; 32];
     arr.copy_from_slice(bytes);
     Hash32(arr)
+}
+
+fn outpoint_key(op: &nulla_core::OutPoint) -> Vec<u8> {
+    let mut key = Vec::with_capacity(36);
+    key.extend_from_slice(op.txid.as_bytes());
+    key.extend_from_slice(&op.vout.to_le_bytes());
+    key
+}
+
+fn active_chain_hashes_in(
+    entries: &HashMap<Hash32, ChainEntry>,
+    tip: Hash32,
+) -> Result<Vec<Hash32>, String> {
+    let mut out = Vec::new();
+    let mut cursor = tip;
+    loop {
+        out.push(cursor);
+        let entry = entries.get(&cursor).ok_or("missing entry")?;
+        if entry.block.header.prev == Hash32::zero() {
+            break;
+        }
+        cursor = entry.block.header.prev;
+    }
+    out.reverse();
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -434,6 +593,8 @@ mod tests {
         Transaction {
             version: PROTOCOL_VERSION,
             kind: TransactionKind::Coinbase,
+            transparent_inputs: vec![],
+            transparent_outputs: vec![],
             anchor_root: Hash32::zero(),
             nullifiers: vec![],
             outputs: vec![coinbase_commitment(height)],
@@ -589,5 +750,13 @@ mod tests {
 
         let chain = ChainStore::load_or_init(&path, genesis).unwrap();
         assert_eq!(chain.best_entry().height, 1);
+    }
+
+    #[test]
+    #[cfg(feature = "dev-pow")]
+    fn print_genesis_hash_for_debug() {
+        let g = make_genesis();
+        let h = block_hash(&g);
+        println!("genesis_hash={h:?}");
     }
 }
