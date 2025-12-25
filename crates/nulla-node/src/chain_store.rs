@@ -297,6 +297,11 @@ impl ChainStore {
         self.entries.get(hash)
     }
 
+    #[cfg(feature = "dev-pow")]
+    pub fn db(&self) -> &ChainDb {
+        &self.db
+    }
+
     pub fn median_time_past(&self, prev: Hash32) -> Option<u64> {
         let mut ts = Vec::new();
         let mut cursor = prev;
@@ -415,8 +420,6 @@ mod tests {
     #[cfg(feature = "dev-pow")]
     use super::*;
     #[cfg(feature = "dev-pow")]
-    use crate::xor_hash;
-    #[cfg(feature = "dev-pow")]
     use nulla_core::{
         txid, Amount, BlockHeader, Commitment, Transaction, TransactionKind, GENESIS_BITS,
         GENESIS_NONCE, GENESIS_TIMESTAMP, PROTOCOL_VERSION,
@@ -458,6 +461,15 @@ mod tests {
             acc = xor_hash(acc, h);
         }
         acc
+    }
+
+    #[cfg(feature = "dev-pow")]
+    fn xor_hash(a: Hash32, b: Hash32) -> Hash32 {
+        let mut out = [0u8; 32];
+        for i in 0..32 {
+            out[i] = a.as_bytes()[i] ^ b.as_bytes()[i];
+        }
+        Hash32(out)
     }
 
     #[cfg(feature = "dev-pow")]

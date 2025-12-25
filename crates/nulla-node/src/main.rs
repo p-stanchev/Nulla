@@ -2,8 +2,6 @@
 #![deny(clippy::unwrap_used)]
 #![deny(clippy::expect_used)]
 
-mod chain_store;
-
 use clap::Parser;
 use std::env;
 use std::net::{SocketAddr, TcpListener};
@@ -12,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use chain_store::{ChainDb, ChainStore};
+use nulla_node::chain_store::{ChainDb, ChainStore};
 #[allow(unused_imports)]
 use nulla_consensus::validate_block_with_prev_bits;
 use nulla_core::{

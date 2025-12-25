@@ -3,7 +3,11 @@ name = "nulla-node"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-description = "Nulla node (v0) – minimal single-node miner."
+description = "Nulla node (v0) — minimal single-node miner."
+
+[lib]
+name = "nulla_node"
+path = "src/lib.rs"
 
 [dependencies]
 nulla-core = { path = "../nulla-core" }
