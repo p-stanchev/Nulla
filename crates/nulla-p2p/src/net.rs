@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -11,7 +11,7 @@ use nulla_consensus::{
     median_time_past, tip_is_better, validate_block_with_prev_bits, validate_header_with_prev_bits,
     work_from_bits,
 };
-use nulla_core::{block_header_hash, Block, BlockHeader, Hash32, GENESIS_HASH_BYTES};
+use nulla_core::{block_header_hash, txid, Block, BlockHeader, Hash32, Transaction, GENESIS_HASH_BYTES};
 use num_bigint::BigUint;
 use thiserror::Error;
 
@@ -358,6 +358,9 @@ pub enum Message {
     Headers(Vec<BlockHeader>),
     GetBlock(Hash32),
     Block(Block),
+    InvTx(Vec<Hash32>),
+    GetTx(Hash32),
+    Tx(Transaction),
 }
 
 #[derive(Default)]
@@ -386,9 +389,13 @@ impl Default for Policy {
 pub struct P2pEngine {
     store: HeaderStore,
     peers: HashMap<u64, PeerState>,
+    outbound: HashMap<u64, mpsc::Sender<Message>>,
     next_peer_id: u64,
     policy: Policy,
     on_block: Option<Arc<dyn Fn(&Block) -> Result<(), String> + Send + Sync>>,
+    on_tx: Option<Arc<dyn Fn(&Transaction) -> Result<(), String> + Send + Sync>>,
+    has_tx: Option<Arc<dyn Fn(&Hash32) -> bool + Send + Sync>>,
+    lookup_tx: Option<Arc<dyn Fn(&Hash32) -> Option<Transaction> + Send + Sync>>,
 }
 
 impl P2pEngine {
@@ -396,9 +403,13 @@ impl P2pEngine {
         Ok(Self {
             store: HeaderStore::open(path, genesis)?,
             peers: HashMap::new(),
+            outbound: HashMap::new(),
             next_peer_id: 0,
             policy: Policy::default(),
             on_block: None,
+            on_tx: None,
+            has_tx: None,
+            lookup_tx: None,
         })
     }
 
@@ -406,9 +417,13 @@ impl P2pEngine {
         Ok(Self {
             store: HeaderStore::open(path, genesis)?,
             peers: HashMap::new(),
+            outbound: HashMap::new(),
             next_peer_id: 0,
             policy,
             on_block: None,
+            on_tx: None,
+            has_tx: None,
+            lookup_tx: None,
         })
     }
 
@@ -439,6 +454,41 @@ impl P2pEngine {
         F: Fn(&Block) -> Result<(), String> + Send + Sync + 'static,
     {
         self.on_block = Some(Arc::new(cb));
+    }
+
+    pub fn set_tx_callback<F>(&mut self, cb: F)
+    where
+        F: Fn(&Transaction) -> Result<(), String> + Send + Sync + 'static,
+    {
+        self.on_tx = Some(Arc::new(cb));
+    }
+
+    pub fn set_has_tx<F>(&mut self, f: F)
+    where
+        F: Fn(&Hash32) -> bool + Send + Sync + 'static,
+    {
+        self.has_tx = Some(Arc::new(f));
+    }
+
+    pub fn set_lookup_tx<F>(&mut self, f: F)
+    where
+        F: Fn(&Hash32) -> Option<Transaction> + Send + Sync + 'static,
+    {
+        self.lookup_tx = Some(Arc::new(f));
+    }
+
+    pub fn send_to(&self, peer_id: u64, msg: Message) -> Result<(), P2pError> {
+        if let Some(tx) = self.outbound.get(&peer_id) {
+            tx.send(msg).map_err(|e| P2pError::Io(e.to_string()))
+        } else {
+            Err(P2pError::Disconnected)
+        }
+    }
+
+    pub fn broadcast(&self, msg: Message) {
+        for tx in self.outbound.values() {
+            let _ = tx.send(msg.clone());
+        }
     }
 
     fn policy_allows_reorg(&self, prev: &Hash32) -> Result<(), P2pError> {
@@ -541,6 +591,55 @@ impl P2pEngine {
                 }
                 Ok(Vec::new())
             }
+            Message::InvTx(txids) => {
+                let mut unknown = Vec::new();
+                for h in txids {
+                    let known = self
+                        .has_tx
+                        .as_ref()
+                        .map(|f| f(&h))
+                        .unwrap_or(false);
+                    if !known {
+                        unknown.push(h);
+                    }
+                }
+                let mut out = Vec::new();
+                for h in unknown {
+                    out.push((peer_id, Message::GetTx(h)));
+                }
+                Ok(out)
+            }
+            Message::GetTx(txid) => {
+                if let Some(lookup) = &self.lookup_tx {
+                    if let Some(tx) = lookup(&txid) {
+                        return Ok(vec![(peer_id, Message::Tx(tx))]);
+                    }
+                }
+                Ok(Vec::new())
+            }
+            Message::Tx(tx) => {
+                if let Some(cb) = &self.on_tx {
+                    if let Err(e) = cb(&tx) {
+                        let peer = self.peers.entry(peer_id).or_default();
+                        peer.disconnected = true;
+                        peer.score += 1;
+                        return Err(P2pError::Io(e));
+                    }
+                }
+                // Re-announce to other peers
+                let txid = txid(&tx).map_err(|e| {
+                    let peer = self.peers.entry(peer_id).or_default();
+                    peer.disconnected = true;
+                    P2pError::Io(e.to_string())
+                })?;
+                let mut out = Vec::new();
+                for (&id, state) in self.peers.iter() {
+                    if id != peer_id && !state.disconnected {
+                        out.push((id, Message::InvTx(vec![txid])));
+                    }
+                }
+                Ok(out)
+            }
         }
     }
 
@@ -575,31 +674,45 @@ impl P2pEngine {
             for stream in listener.incoming().flatten() {
                 let _ = stream.set_nodelay(true);
                 let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
+                let (tx_out, rx_out) = mpsc::channel::<Message>();
                 let mut guard = engine.lock().expect("engine");
                 let peer_id = guard.next_peer_id();
+                guard.outbound.insert(peer_id, tx_out.clone());
                 drop(guard);
                 let eng = Arc::clone(&engine);
                 thread::spawn(move || {
                     let mut stream = stream;
                     loop {
+                        // Drain outbound queue first.
+                        while let Ok(m) = rx_out.try_recv() {
+                            if P2pEngine::write_message(&mut stream, &m).is_err() {
+                                break;
+                            }
+                        }
                         let msg = match P2pEngine::read_message(&mut stream) {
                             Ok(Some(m)) => m,
                             Ok(None) => break,
                             Err(_) => break,
                         };
-                        let responses = {
+                        let send_result = {
                             let mut p2p = eng.lock().expect("engine");
                             match p2p.handle_message(peer_id, msg) {
-                                Ok(out) => out,
-                                Err(_) => break,
+                                Ok(out) => {
+                                    for (pid, m) in out {
+                                        let _ = p2p.send_to(pid, m);
+                                    }
+                                    Ok(())
+                                }
+                                Err(e) => Err(e),
                             }
                         };
-                        for (_, m) in responses {
-                            if P2pEngine::write_message(&mut stream, &m).is_err() {
-                                break;
-                            }
+                        if send_result.is_err() {
+                            break;
                         }
                     }
+                    let mut guard = eng.lock().expect("engine");
+                    guard.outbound.remove(&peer_id);
+                    guard.peers.remove(&peer_id);
                 });
             }
         })
@@ -635,28 +748,44 @@ impl P2pEngine {
             let _ = P2pEngine::write_message(&mut stream, &Message::GetBlock(*h));
         }
 
+        let (tx_out, rx_out) = mpsc::channel::<Message>();
+        {
+            let mut eng = engine.lock().expect("engine");
+            eng.outbound.insert(peer_id, tx_out.clone());
+        }
         let eng = Arc::clone(&engine);
         let handle = thread::spawn(move || {
             let mut stream = stream;
             loop {
+                while let Ok(m) = rx_out.try_recv() {
+                    if P2pEngine::write_message(&mut stream, &m).is_err() {
+                        break;
+                    }
+                }
                 let msg = match P2pEngine::read_message(&mut stream) {
                     Ok(Some(m)) => m,
                     Ok(None) => break,
                     Err(_) => break,
                 };
-                let responses = {
+                let send_result = {
                     let mut p2p = eng.lock().expect("engine");
                     match p2p.handle_message(peer_id, msg) {
-                        Ok(out) => out,
-                        Err(_) => break,
+                        Ok(out) => {
+                            for (pid, m) in out {
+                                let _ = p2p.send_to(pid, m);
+                            }
+                            Ok(())
+                        }
+                        Err(e) => Err(e),
                     }
                 };
-                for (_, m) in responses {
-                    if P2pEngine::write_message(&mut stream, &m).is_err() {
-                        break;
-                    }
+                if send_result.is_err() {
+                    break;
                 }
             }
+            let mut eng = eng.lock().expect("engine");
+            eng.outbound.remove(&peer_id);
+            eng.peers.remove(&peer_id);
         });
         Ok(handle)
     }
