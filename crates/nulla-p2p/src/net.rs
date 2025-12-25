@@ -1159,10 +1159,12 @@ mod tests {
         };
 
         // Submit tx to engine A (peer 1).
-        let out = a.handle_message(1, Message::Tx(tx)).expect("tx ok");
+        let out = a.handle_message(1, Message::Tx(tx.clone())).expect("tx ok");
         for (pid, msg) in out {
             a.send_to(pid, msg).unwrap();
         }
+        // Simulate local broadcast from A to B (as RPC would do).
+        tx_ab.send(Message::Tx(tx.clone())).unwrap();
 
         // Deliver messages from A -> B.
         while let Ok(m) = rx_ab.try_recv() {

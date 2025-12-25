@@ -122,10 +122,69 @@ pub fn enforce_max_difficulty_drop(prev_bits: u32, next_bits: u32) -> Result<(),
     Ok(())
 }
 
+/// Compute the next difficulty target using a Linear Weighted Moving Average (LWMA).
+///
+/// Inputs must be ordered oldest -> newest. `window` should typically be
+/// `DIFFICULTY_WINDOW` long but the function will operate on any length >= 2.
+///
+/// `max_target` caps the easiest allowable target (e.g., genesis target).
+pub fn next_bits_lwma(
+    window: &[(u64, u32)],
+    target_secs: u64,
+    max_target: &BigUint,
+    ) -> Result<u32, ConsensusError> {
+    if window.len() < 2 {
+        return Err(ConsensusError::InvalidTarget);
+    }
+
+    // Sum the targets to derive an average target for the window.
+    let mut sum_target = BigUint::zero();
+    for &(_, bits) in window {
+        sum_target += bits_to_target(bits)?;
+    }
+    let n = window.len() as u64;
+    let avg_target = &sum_target / n;
+
+    // Weighted sum of solvetimes, clamped to avoid outliers.
+    let mut sum_weighted: u128 = 0;
+    for (idx, pair) in window.windows(2).enumerate() {
+        let prev_ts = pair[0].0;
+        let cur_ts = pair[1].0;
+        let raw = cur_ts.saturating_sub(prev_ts);
+        let clamped = raw.clamp(1, target_secs.saturating_mul(6));
+        let weight = (idx as u128) + 1; // weights 1..N-1
+        sum_weighted = sum_weighted.saturating_add((clamped as u128).saturating_mul(weight));
+    }
+
+    // Normalization constant for LWMA: k = N*(N+1)*T/2
+    let k = n.saturating_mul(n + 1).saturating_mul(target_secs) / 2;
+    let k = k.max(1);
+
+    let mut next_target =
+        (&avg_target * BigUint::from(sum_weighted)) / BigUint::from(k);
+
+    // Clamp to per-block drop bound and maximum/easiest target.
+    let prev_bits = window.last().unwrap().1;
+    let prev_target = bits_to_target(prev_bits)?;
+    let max_increase = (&prev_target * MAX_TARGET_INCREASE_NUM) / MAX_TARGET_INCREASE_DEN;
+    if next_target > max_increase {
+        next_target = max_increase;
+    }
+    if next_target > *max_target {
+        next_target = max_target.clone();
+    }
+    if next_target.is_zero() {
+        next_target = BigUint::from(1u32);
+    }
+
+    target_to_bits(&next_target)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::error::ConsensusError;
+    use nulla_core::{BLOCK_TIME_SECS, DIFFICULTY_WINDOW};
 
     #[test]
     fn rejects_zero_or_negative_targets() {
@@ -178,5 +237,62 @@ mod tests {
         let allowed_target = (&prev_target * 120u32) / 100u32;
         let allowed_bits = target_to_bits(&allowed_target).expect("encode");
         enforce_max_difficulty_drop(prev_bits, allowed_bits).expect("within bound");
+    }
+
+    #[test]
+    fn lwma_stable_when_on_target() {
+        let max_target = bits_to_target(0x207f_ffff).unwrap();
+        let mut window = Vec::new();
+        let mut ts = 1_700_000_000u64;
+        for _ in 0..DIFFICULTY_WINDOW {
+            window.push((ts, 0x207f_ffff));
+            ts += BLOCK_TIME_SECS;
+        }
+        let next = next_bits_lwma(&window, BLOCK_TIME_SECS, &max_target).unwrap();
+        let next_target = bits_to_target(next).unwrap();
+        let prev_target = bits_to_target(0x207f_ffff).unwrap();
+        // Allow small rounding drift but require near stability.
+        let upper = (&prev_target * 105u32) / 100u32;
+        let lower = (&prev_target * 95u32) / 100u32;
+        assert!(
+            next_target >= lower && next_target <= upper,
+            "target should remain near-stable"
+        );
+    }
+
+    #[test]
+    fn lwma_hardens_on_fast_blocks() {
+        let max_target = bits_to_target(0x207f_ffff).unwrap();
+        let mut window = Vec::new();
+        let mut ts = 1_700_000_000u64;
+        for _ in 0..DIFFICULTY_WINDOW {
+            window.push((ts, 0x207f_ffff));
+            ts += BLOCK_TIME_SECS / 2; // twice as fast as target
+        }
+        let next_bits = next_bits_lwma(&window, BLOCK_TIME_SECS, &max_target).unwrap();
+        let next_target = bits_to_target(next_bits).unwrap();
+        let prev_target = bits_to_target(0x207f_ffff).unwrap();
+        assert!(next_target < prev_target, "target should get harder");
+    }
+
+    #[test]
+    fn lwma_respects_drop_clamp() {
+        let prev_bits = 0x207f_ffffu32;
+        let prev_target = bits_to_target(prev_bits).unwrap();
+        let max_target = prev_target.clone();
+        let mut window = Vec::new();
+        let mut ts = 1_700_000_000u64;
+        // Very slow blocks to try to force a big drop.
+        for _ in 0..DIFFICULTY_WINDOW {
+            window.push((ts, prev_bits));
+            ts += BLOCK_TIME_SECS * 10;
+        }
+        let next_bits = next_bits_lwma(&window, BLOCK_TIME_SECS, &max_target).unwrap();
+        let next_target = bits_to_target(next_bits).unwrap();
+        let clamp = (&prev_target * MAX_TARGET_INCREASE_NUM) / MAX_TARGET_INCREASE_DEN;
+        assert!(
+            next_target <= clamp,
+            "next target should be clamped to per-block drop bound"
+        );
     }
 }

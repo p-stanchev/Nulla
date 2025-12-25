@@ -10,7 +10,7 @@ use std::env;
 use std::fs;
 use std::net::{SocketAddr, TcpListener};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -130,6 +130,7 @@ fn main() {
             Ok(())
         });
     }
+    let is_syncing = Arc::new(AtomicBool::new(true));
     {
         let chain_for_cb = Arc::clone(&chain);
         let mem_for_cb = Arc::clone(&mempool);
@@ -145,7 +146,12 @@ fn main() {
         });
         let mem_for_tx = Arc::clone(&mempool);
         let net_for_tx = Arc::clone(&p2p);
+        let sync_flag = Arc::clone(&is_syncing);
         guard.set_tx_callback(move |tx| {
+            if sync_flag.load(Ordering::Relaxed) {
+                // Drop txs during initial sync to avoid churn.
+                return Ok(());
+            }
             let chain = chain_for_cb.lock().expect("chain lock");
             let mut pool = mem_for_tx.lock().expect("mempool");
             let txid = pool
@@ -169,6 +175,7 @@ fn main() {
         let best_height = { chain.lock().expect("chain lock").best_entry().height };
         let peer_height = { p2p.lock().expect("p2p").best_peer_height() };
         let syncing = best_height + 1 < peer_height;
+        is_syncing.store(syncing, Ordering::Relaxed);
 
         // Hold mining and mempool work until synced.
         if syncing || !cfg.mining_enabled {
@@ -208,7 +215,8 @@ fn main() {
                 .median_time_past(prev)
                 .expect("mtp available for non-genesis");
 
-            let block = build_block(prev, prev_bits, mtp, &chain_lock, txs, DEVNET_BITS);
+            let next_bits = chain_lock.next_bits();
+            let block = build_block(prev, prev_bits, mtp, &chain_lock, txs, next_bits);
             let block_for_store = block.clone();
 
             chain_lock.insert_block(block).expect("block must validate and attach");

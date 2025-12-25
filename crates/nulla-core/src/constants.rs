@@ -86,6 +86,9 @@ pub const MAX_TARGET_INCREASE_DEN: u32 = 100;
 /// Block time target in seconds (economic / UX target).
 pub const BLOCK_TIME_SECS: u64 = 60;
 
+/// LWMA difficulty adjustment window (number of blocks).
+pub const DIFFICULTY_WINDOW: usize = 60;
+
 /// Number of blocks per halving interval (4 years at 60s blocks).
 pub const HALVING_INTERVAL_BLOCKS: u64 = 2_102_400;
 

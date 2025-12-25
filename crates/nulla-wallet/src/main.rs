@@ -41,7 +41,7 @@ fn argon2_params() -> Argon2<'static> {
 struct Cli {
     #[arg(long, default_value = "nulla.wallet.db")]
     wallet_db: PathBuf,
-    #[arg(long, default_value = "127.0.0.1:18445")]
+    #[arg(long, default_value = "127.0.0.1:27445")]
     rpc: String,
     #[arg(long)]
     rpc_auth_token: Option<String>,

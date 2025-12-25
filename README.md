@@ -10,7 +10,7 @@ Nulla is a privacy-first Proof-of-Work blockchain written in Rust. It targets pr
 
 ## Status
 
-- Consensus locked: genesis, tail emission v1, MTP(11) with +/-2h drift, difficulty clamp, PoW vectors, transparent P2PKH txs (coinbase pays a transparent output).
+- Consensus locked: genesis, tail emission v1, MTP(11) with +/-2h drift, LWMA difficulty targeting 60s (window 60) with per-block drop clamp, PoW vectors, transparent P2PKH txs (coinbase pays a transparent output).
 - Chain identity locked: chain ID `0`, magic `NUL0`, address prefix `0x35`.
 - Persisted ChainStore: sled-backed headers/blocks/index/UTXOs + best tip; restart-safe with body reconciliation.
 - P2P v0: TCP header-first sync (version/verack, ping/pong, getheaders/headers), heaviest-work selection.
@@ -18,6 +18,10 @@ Nulla is a privacy-first Proof-of-Work blockchain written in Rust. It targets pr
 - Policy layer: reorg depth cap, peer scoring/bans, basic rate limits (non-consensus).
 - Wallet: transparent CLI (keygen/address/encrypted storage/rescan/balance/list/send) via node RPC.
 - Mempool/Fees: transparent tx acceptance wired to ChainStore UTXO view; base fee enforced; miner includes mempool txs.
+- Sync + mining gating: mining/mempool work waits until the node catches the best peer height; `--no-mine`/`NULLA_NO_MINE` for follower/seed mode.
+- Networking bootstrap: seeds supported via `--seeds`/`NULLA_SEEDS` fallback when no explicit `--peers`.
+- RPC helpers: `get_balance`/`get_utxos` accept address or pubkey hash; submit/validate/chain info unchanged.
+- P2P tx relay: inv/get_tx/tx wired through the single mempool validation path.
 
 ---
 
@@ -27,7 +31,7 @@ Nulla is a privacy-first Proof-of-Work blockchain written in Rust. It targets pr
 - **ChainStore / ChainDB:** sled-backed storage for headers, blocks, index entries `{hash,height,prev,bits,time,cumulative_work}`, UTXO index (including coinbase), and best tip with recovery coverage.
 - **Fork Choice:** heaviest cumulative work with deterministic tie-breaker; difficulty-drop clamp enforced everywhere; single validation entrypoint (no bypass).
 - **P2P v0 (header-first):** TCP transport, locators, fork handling, restart safety. Dev-only easy PoW lives behind the `dev-pow` feature for tests/vector generation.
-- **Node:** devnet miner loop wired through ChainStore and P2pEngine; block download restricted to the best chain.
+- **Node:** devnet miner loop wired through ChainStore and P2pEngine; LWMA difficulty targeting 60s with drop clamp; block download restricted to the best chain.
 - **Mempool/Fees:** transparent tx acceptance with base fee policy; txs reannounced over P2P.
 
 ---
@@ -55,9 +59,8 @@ Node (must be running for wallet operations)
   Env fallbacks: `NULLA_LISTEN`, `NULLA_PEERS`, `NULLA_SEEDS`, `NULLA_DB`, `NULLA_REORG_CAP`, `NULLA_MINER_ADDRESS`, `NULLA_NO_MINE`.
 - RPC: `NULLA_RPC_LISTEN=127.0.0.1:27445` (default), `NULLA_RPC_AUTH_TOKEN` optional.
 - Seeds: `NULLA_SEEDS` (comma-separated `host:port`), used if no explicit `--peers` provided.
-- Disable mining (follower/seed mode): `--no-mine` or env `NULLA_NO_MINE` set.
-- Mining waits for sync: mining/mempool work stays off until local height catches the best peer height.
-- Mining waits for sync: mining/mempool work stays off until local height catches the best peer height.
+- Sync/roles: mining and mempool processing stay off until local height catches the best peer height (initial-sync gate). Use `--no-mine`/`NULLA_NO_MINE` for follower/seed nodes.
+- Difficulty: LWMA(60) targeting 60s with per-block drop clamp (consensus).
 
 Wallet (RPC-only; does **not** open the node DB)
 - Init: `cargo run -p nulla-wallet -- init`
@@ -65,18 +68,20 @@ Wallet (RPC-only; does **not** open the node DB)
 - Rescan UTXOs (node running):  
   `cargo run -p nulla-wallet -- rescan`
 - Balance: `cargo run -p nulla-wallet -- balance`
-- Send: `cargo run -p nulla-wallet -- send --to <addr> --amount <atoms> --fee <atoms>`
-- Common flags: `--wallet-db <path>` (default `nulla.wallet.db`), `--rpc <addr>` (default `127.0.0.1:18445`), `--rpc-auth-token <token>` if the node requires it.
+- Send (base fee added automatically):  
+  `cargo run -p nulla-wallet -- send --to <addr> --amount <atoms>`
+- Common flags: `--wallet-db <path>` (default `nulla.wallet.db`), `--rpc <addr>` (default `127.0.0.1:27445`), `--rpc-auth-token <token>` if the node requires it.
 - Command syntax: keep a single `--` between cargo and wallet args; do **not** place an extra `--` before the subcommand (e.g., `cargo run -p nulla-wallet -- --wallet-db my.db rescan`).
 
-Two-node example (header sync)
+Two-node example (header + block + tx relay)
 ```bash
-# Node A (default listen)
+# Node A (default listen 27444, RPC 27445)
 cargo run -p nulla-node
 
-# Node B (custom port, connect to A)
-NULLA_LISTEN=127.0.0.1:18445 \
-NULLA_PEERS=127.0.0.1:18444 \
+# Node B (custom listen/RPC, connect to A)
+NULLA_LISTEN=127.0.0.1:27446 \
+NULLA_PEERS=127.0.0.1:27444 \
+NULLA_RPC_LISTEN=127.0.0.1:27447 \
 cargo run -p nulla-node
 ```
 
@@ -87,25 +92,22 @@ Mainnet prep notes: see `docs/mainnet-plan.md` (chain ID 0, policy, launch check
 
 ## Testnet Flow (quick checklist)
 
-1) Start node with your miner address.  
-2) Wallet `init` + `addr`, then `rescan` (node running).  
-3) Mine a block → wallet balance increases (transparent coinbase UTXO).  
-4) Wallet `send --to <addr> --amount <atoms> --fee 0` → mine again → tx confirmed.  
+1) Start node with your miner address.
+2) Wallet `init` + `addr`, then `rescan` (node running).
+3) Mine a block -> wallet balance increases (transparent coinbase UTXO).
+4) Wallet `send --to <addr> --amount <atoms>` -> mine again -> tx confirmed.
 5) Repeat; restart nodes to confirm persistence.
 
 ### Common gotchas (send/rescan/mine)
 - No balance after send: keep the node running and mine at least one block; then rescan the receiver wallet.
-- UnknownInput: rescan the sender wallet, ensure the node is running, and that the miner is paying to the same wallet you’re spending from.
+- UnknownInput: rescan the sender wallet, ensure the node is running, and that the miner is paying to the same wallet you are spending from.
 - Wrong miner address: start the node with the address shown by `cargo run -p nulla-wallet -- --wallet-db <db> addr`.
-- RPC refused: start the node first (default RPC 127.0.0.1:18445), or pass `--rpc <addr>`/`--rpc-auth-token <token>`.
+- RPC refused: start the node first (default RPC 127.0.0.1:27445), or pass `--rpc <addr>`/`--rpc-auth-token <token>`.
 - Command syntax: only one `--` between cargo and wallet args, e.g. `cargo run -p nulla-wallet -- --wallet-db my.db rescan`.
 
 Notes:
-- Tx relay is local-only for now (no P2P tx gossip yet).
+- Tx relay uses P2P inv/get_tx/tx; wallets still talk to the local node via RPC.
 - No zk, no pools, no explorers, no Stratum yet.
-
----
-
 ## Testing
 
 ```bash
@@ -119,9 +121,9 @@ cargo test --workspace --features dev-pow
 
 ## Roadmap (next)
 
-1) Add P2P tx relay (local RPC already exists).
-2) Tag `v0.1.0-testnet`.
-3) Explore zk/shielded transfers only after wallet + relay are solid.
+1) Harden tx relay + fee policy (base fee already enforced; add ordering/limits).
+2) GUI wallet (Tauri) consuming the existing RPCs (balance/utxos/submit_tx).
+3) Tag `v0.3.0-testnet`, then consider mainnet freeze; zk/shielded transfers come after stable transparent layer.
 
 ---
 
@@ -137,3 +139,4 @@ cargo test --workspace --features dev-pow
 ## Disclaimer
 
 This code is experimental and unaudited. Do not use it for real funds.
+

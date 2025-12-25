@@ -2,8 +2,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use borsh::{to_vec, BorshDeserialize, BorshSerialize};
-use nulla_consensus::{tip_is_better, validate_block_with_prev_bits, work_from_bits};
-use nulla_core::{block_header_hash, txid, Amount, Block, Hash32, OutPoint, TransactionKind, GENESIS_HASH_BYTES};
+use nulla_consensus::{bits_to_target, next_bits_lwma, tip_is_better, validate_block_with_prev_bits, work_from_bits};
+use nulla_core::{block_header_hash, txid, Amount, Block, Hash32, OutPoint, TransactionKind, BLOCK_TIME_SECS, DIFFICULTY_WINDOW, GENESIS_BITS, GENESIS_HASH_BYTES};
 use nulla_state::LedgerState;
 use num_bigint::BigUint;
 use sled::transaction::{Transactional, TransactionResult};
@@ -378,6 +378,30 @@ impl ChainStore {
 
     pub fn best_bits(&self) -> u32 {
         self.entries[&self.best].block.header.bits
+    }
+
+    /// Compute the next difficulty bits using LWMA over the active chain.
+    pub fn next_bits(&self) -> u32 {
+        // Collect newest-first, then reverse to oldest-first as expected by LWMA.
+        let mut window = Vec::new();
+        let mut cursor = self.best;
+        for _ in 0..DIFFICULTY_WINDOW {
+            if let Some(entry) = self.entries.get(&cursor) {
+                window.push((entry.block.header.timestamp, entry.block.header.bits));
+                if entry.block.header.prev == Hash32::zero() {
+                    break;
+                }
+                cursor = entry.block.header.prev;
+            } else {
+                break;
+            }
+        }
+        window.reverse();
+        if window.len() < 2 {
+            return GENESIS_BITS;
+        }
+        let max_target = bits_to_target(GENESIS_BITS).expect("genesis target");
+        next_bits_lwma(&window, BLOCK_TIME_SECS, &max_target).unwrap_or(GENESIS_BITS)
     }
 
     pub fn best_entry(&self) -> &ChainEntry {
