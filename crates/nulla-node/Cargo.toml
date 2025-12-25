@@ -16,6 +16,7 @@ nulla-state = { path = "../nulla-state" }
 nulla-p2p = { path = "../nulla-p2p" }
 
 blake3 = "1.5"
+bs58 = "0.5"
 k256 = { version = "0.13", features = ["ecdsa"] }
 time = "0.3"
 num-bigint = "0.4"

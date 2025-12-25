@@ -674,7 +674,7 @@ mod tests {
     fn genesis_header() -> BlockHeader {
         let prev = Hash32::zero();
         let tx_merkle_root =
-            Hash32(hex_literal::hex!("8c0c4a7bd5ed210d5bbd47724e07739252e283ffb352aaa5a238100f53e5ade3"));
+            Hash32(hex_literal::hex!("4d89bf74b9c3633fc497f182020f31304c94b1096413687c891a57e7bb92cca3"));
         let commitment_root =
             Hash32(hex_literal::hex!("300eb2dc8d3001271ea0f2fcada9387e7f5817533d863e5a45e5bd8e5f2ca09e"));
         BlockHeader {
@@ -684,7 +684,7 @@ mod tests {
             commitment_root,
             timestamp: 1_700_000_000,
             bits: 0x207f_ffff,
-            nonce: 6,
+            nonce: 7,
         }
     }
 

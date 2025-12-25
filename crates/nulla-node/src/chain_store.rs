@@ -616,7 +616,10 @@ mod tests {
             version: PROTOCOL_VERSION,
             kind: TransactionKind::Coinbase,
             transparent_inputs: vec![],
-            transparent_outputs: vec![],
+            transparent_outputs: vec![nulla_core::TransparentOutput {
+                value: subsidy,
+                pubkey_hash: [0u8; 20],
+            }],
             anchor_root: Hash32::zero(),
             nullifiers: vec![],
             outputs: vec![coinbase_commitment(height)],
@@ -772,6 +775,22 @@ mod tests {
 
         let chain = ChainStore::load_or_init(&path, genesis).unwrap();
         assert_eq!(chain.best_entry().height, 1);
+    }
+
+    #[test]
+    #[cfg(feature = "dev-pow")]
+    fn coinbase_utxo_is_indexed() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("db");
+        let genesis = make_genesis();
+        let chain = ChainStore::load_or_init(&path, genesis.clone()).unwrap();
+        let cb_txid = txid(&genesis.txs[0]).expect("txid");
+        let op = OutPoint {
+            txid: cb_txid,
+            vout: 0,
+        };
+        let utxo = chain.utxo_lookup(&op).expect("utxo");
+        assert_eq!(utxo.value, 800_000_000);
     }
 
     #[test]

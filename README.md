@@ -10,7 +10,7 @@ Nulla is a privacy-first Proof-of-Work blockchain written in Rust. It targets pr
 
 ## Status
 
-- Consensus locked: genesis, tail emission v1, MTP(11) with +/-2h drift, difficulty clamp, PoW vectors, transparent P2PKH txs now in consensus.
+- Consensus locked: genesis, tail emission v1, MTP(11) with +/-2h drift, difficulty clamp, PoW vectors, transparent P2PKH txs now in consensus (coinbase pays a transparent output).
 - Persisted ChainStore: sled-backed headers/blocks/index/UTXOs + best tip; restart-safe with body reconciliation.
 - P2P v0: TCP header-first sync (version/verack, ping/pong, getheaders/headers), heaviest-work selection.
 - Block download: best-chain-only path with strict header<->block checks.
@@ -23,7 +23,7 @@ Nulla is a privacy-first Proof-of-Work blockchain written in Rust. It targets pr
 ## What Works Today
 
 - **Consensus:** BLAKE3-based PoW (v0), compact difficulty, median-time-past(11), tail emission, hardcoded genesis, multi-height PoW serialization vectors.
-- **ChainStore / ChainDB:** sled-backed storage for headers, blocks, index entries `{hash,height,prev,bits,time,cumulative_work}`, UTXO index, and best tip with recovery coverage.
+- **ChainStore / ChainDB:** sled-backed storage for headers, blocks, index entries `{hash,height,prev,bits,time,cumulative_work}`, UTXO index (including coinbase), and best tip with recovery coverage.
 - **Fork Choice:** heaviest cumulative work with deterministic tie-breaker; difficulty-drop clamp enforced everywhere; single validation entrypoint (no bypass).
 - **P2P v0 (header-first):** TCP transport, locators, fork handling, restart safety. Dev-only easy PoW lives behind the `dev-pow` feature for tests/vector generation.
 - **Node:** devnet miner loop wired through ChainStore and P2pEngine; block download restricted to the best chain.
@@ -50,6 +50,8 @@ Env:
 - CLI flags (primary): `--listen` (default `0.0.0.0:18444`), `--peers`, `--db` (default `./nulla.chain.db`), `--reorg-cap` (default `100`, policy-only).
 - Env fallbacks: `NULLA_LISTEN`, `NULLA_PEERS`, `NULLA_DB`, `NULLA_REORG_CAP`. Resolution order: flag > env > default.
 - Chain DBs live in the working directory by default: `nulla.chain.db`, plus `nulla.p2p.db` for P2P metadata.
+- Mining address: `--miner-address` (Base58Check, prefix 0x35) or `NULLA_MINER_ADDRESS`. If unset, rewards burn to a null hash.
+- Wallet rescan expects exclusive access to the chain DB (stop the node during a full rescan, or run against a snapshot).
 
 Examples (two local nodes):
 ```bash
@@ -69,7 +71,7 @@ cargo run -p nulla-node
 - Two nodes: use the run examples above; expose `--listen 0.0.0.0:18444` on at least one node so others can dial.
 - Connecting peers: pass `--peers ip:port,...` (or `NULLA_PEERS`) to seed connections.
 - Mining (solo, devnet loop): run `cargo run -p nulla-node` to produce deterministic blocks; PoW remains consensus-valid (dev-pow is test-only).
-- Wallet status: transparent wallet scaffold exists (init/addr/balance/list/rescan), sending/relay not yet wired.
+- Wallet status: transparent wallet exists (init/addr/balance/list/rescan/send). Mining produces transparent UTXOs the wallet can see; tx relay to peers is still minimal.
 - Known limitations: no zk yet, no explorers, no Stratum; focus is on sync/restart correctness and fork handling.
 
 ---

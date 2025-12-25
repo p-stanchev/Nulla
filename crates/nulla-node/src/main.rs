@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+use bs58::decode as b58decode;
 use nulla_node::chain_store::{ChainDb, ChainStore};
 #[allow(unused_imports)]
 use nulla_consensus::validate_block_with_prev_bits;
@@ -44,6 +45,9 @@ struct Config {
     /// Policy reorg cap (non-consensus)
     #[arg(long = "reorg-cap")]
     reorg_cap: Option<u64>,
+    /// Miner payout address (Base58Check, prefix 0x35). Defaults to burn if not set.
+    #[arg(long = "miner-address")]
+    miner_address: Option<String>,
 }
 
 fn main() {
@@ -54,6 +58,7 @@ fn main() {
     );
 
     let cfg = resolve_config(Config::parse());
+    println!("Mining rewards sent to: {}", cfg.miner_addr_b58);
 
     // -----------------
     // Genesis block (height 0) and DB setup
@@ -126,7 +131,7 @@ fn main() {
             .fold(Amount::zero(), |acc, tx| acc.checked_add(tx.fee).unwrap_or(acc));
         let subsidy = block_subsidy(height);
 
-        let coinbase = coinbase_tx(height, fee_sum, subsidy);
+        let coinbase = coinbase_tx(height, fee_sum, subsidy, cfg.miner_pubkey_hash);
         let mut txs = Vec::with_capacity(1 + txs_from_pool.len());
         txs.push(coinbase);
         txs.extend_from_slice(&txs_from_pool);
@@ -175,7 +180,8 @@ fn main() {
 /// Build and mine the deterministic genesis block.
 fn build_genesis() -> Block {
     let height0 = 0u64;
-    let coinbase0 = coinbase_tx(height0, Amount::zero(), block_subsidy(height0));
+    // Genesis rewards are sent to burn address; regular blocks use configured miner address.
+    let coinbase0 = coinbase_tx(height0, Amount::zero(), block_subsidy(height0), [0u8; 20]);
     let txs = vec![coinbase0];
 
     let state = LedgerState::new();
@@ -298,12 +304,17 @@ fn apply_and_print(height: u64, state: &mut LedgerState, block: &Block) {
 ///
 /// Pre-zk v0: we cannot verify amounts inside commitments yet, so coinbase carries
 /// explicit claims (subsidy + fee total). State enforces these exactly.
-fn coinbase_tx(height: u64, fees: Amount, subsidy: Amount) -> Transaction {
+fn coinbase_tx(height: u64, fees: Amount, subsidy: Amount, miner_pk_hash: [u8; 20]) -> Transaction {
     Transaction {
         version: PROTOCOL_VERSION,
         kind: TransactionKind::Coinbase,
         transparent_inputs: vec![],
-        transparent_outputs: vec![],
+        transparent_outputs: vec![nulla_core::TransparentOutput {
+            value: subsidy
+                .checked_add(fees)
+                .unwrap_or(Amount::zero()),
+            pubkey_hash: miner_pk_hash,
+        }],
         anchor_root: Hash32::zero(),
         nullifiers: vec![],
         outputs: vec![coinbase_commitment(height)],
@@ -350,6 +361,33 @@ fn submit_tx_to_node(
     let chain_guard = chain.lock().expect("chain lock");
     let mut pool = mempool.lock().expect("mempool lock");
     pool.submit_tx(&*chain_guard, tx)
+}
+
+fn decode_address(addr: &str) -> Result<[u8; 20], String> {
+    let bytes = b58decode(addr).into_vec().map_err(|e| e.to_string())?;
+    if bytes.len() != 1 + 20 + 4 {
+        return Err("invalid address length".into());
+    }
+    if bytes[0] != ADDRESS_PREFIX {
+        return Err("invalid address prefix".into());
+    }
+    let (payload, checksum) = bytes.split_at(1 + 20);
+    let mut expected = [0u8; 4];
+    expected.copy_from_slice(&checksum4(payload));
+    if expected != checksum[0..4] {
+        return Err("checksum mismatch".into());
+    }
+    let mut h160 = [0u8; 20];
+    h160.copy_from_slice(&payload[1..]);
+    Ok(h160)
+}
+
+fn checksum4(data: &[u8]) -> [u8; 4] {
+    let mut h = blake3::Hasher::new();
+    h.update(data);
+    let mut out = [0u8; 4];
+    h.finalize_xof().fill(&mut out);
+    out
 }
 
 fn drain_local_submissions(
@@ -430,12 +468,23 @@ fn resolve_config(cli: Config) -> ResolvedConfig {
         .or_else(|| env::var("NULLA_REORG_CAP").ok().and_then(|v| v.parse().ok()))
         .unwrap_or(100);
 
+    let (miner_pubkey_hash, miner_addr_b58) =
+        if let Some(addr) = cli.miner_address.or_else(|| env::var("NULLA_MINER_ADDRESS").ok()) {
+            let h = decode_address(&addr).expect("invalid miner address");
+            (h, addr)
+        } else {
+            eprintln!("warn: miner address not set; coinbase will burn rewards");
+            ([0u8; 20], format!("burn({:02x}...)", ADDRESS_PREFIX))
+        };
+
     ResolvedConfig {
         listen,
         peers,
         db_path,
         p2p_db_path,
         reorg_cap,
+        miner_pubkey_hash,
+        miner_addr_b58,
     }
 }
 
@@ -445,6 +494,8 @@ struct ResolvedConfig {
     db_path: PathBuf,
     p2p_db_path: PathBuf,
     reorg_cap: u64,
+    miner_pubkey_hash: [u8; 20],
+    miner_addr_b58: String,
 }
 
 fn compute_best_chain_and_missing(db: &ChainDb) -> (Hash32, Vec<Hash32>, Vec<Hash32>) {
@@ -541,7 +592,8 @@ mod tests {
 
         let mut _state = chain.rebuild_state();
         for height in 1u64..=12 {
-            let coinbase = coinbase_tx(height, Amount::zero(), block_subsidy(height));
+            let coinbase =
+                coinbase_tx(height, Amount::zero(), block_subsidy(height), [0u8; 20]);
             let prev = chain.best_hash();
             let prev_bits = chain.best_bits();
             let mtp = chain.median_time_past(prev).unwrap_or(GENESIS_TIMESTAMP);
@@ -575,7 +627,8 @@ mod tests {
             let prev_entry = chain.entry(&prev).unwrap();
             let prev_bits = prev_entry.block.header.bits;
             let mtp = chain.median_time_past(prev).unwrap();
-            let coinbase = coinbase_tx(height, Amount::zero(), block_subsidy(height));
+            let coinbase =
+                coinbase_tx(height, Amount::zero(), block_subsidy(height), [0u8; 20]);
             let mut block = build_block(prev, prev_bits, mtp, chain, vec![coinbase], bits);
             block.header.timestamp = prev_entry.block.header.timestamp + 1;
             block
