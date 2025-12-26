@@ -1238,4 +1238,31 @@ mod tests {
         assert_eq!(acc_b.lock().unwrap().len(), 1);
         assert_eq!(acc_a.lock().unwrap()[0], acc_b.lock().unwrap()[0]);
     }
+
+    #[test]
+    fn too_many_headers_hits_policy() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("db");
+        let genesis = genesis_header();
+        let mut p2p = P2pEngine::new(&path, genesis.clone()).unwrap();
+        let child = make_child(&genesis, genesis.bits, genesis.timestamp + 1);
+        let headers = vec![child; 65]; // MAX_HEADERS is 64
+        let err = p2p
+            .handle_message(1, Message::Headers(headers))
+            .expect_err("should reject too many headers");
+        matches!(err, P2pError::Policy(_));
+    }
+
+    #[test]
+    fn too_many_inv_tx_hits_policy() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("db");
+        let genesis = genesis_header();
+        let mut p2p = P2pEngine::new(&path, genesis).unwrap();
+        let hashes = vec![Hash32::zero(); 1_100]; // > MAX_INV_TX
+        let err = p2p
+            .handle_message(1, Message::InvTx(hashes))
+            .expect_err("should reject too many inv tx");
+        matches!(err, P2pError::Policy(_));
+    }
 }

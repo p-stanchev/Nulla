@@ -41,6 +41,8 @@ pub struct Mempool {
     txs: HashMap<TxId, MemEntry>,
     spent: HashMap<OutPoint, TxId>,
     total_bytes: usize,
+    max_txs: usize,
+    max_bytes: usize,
 }
 
 impl Mempool {
@@ -49,6 +51,20 @@ impl Mempool {
             txs: HashMap::new(),
             spent: HashMap::new(),
             total_bytes: 0,
+            max_txs: MAX_MEMPOOL_TXS,
+            max_bytes: MAX_MEMPOOL_BYTES,
+        }
+    }
+
+    /// Test-only helper to use smaller limits.
+    #[cfg(test)]
+    pub fn with_limits(max_txs: usize, max_bytes: usize) -> Self {
+        Self {
+            txs: HashMap::new(),
+            spent: HashMap::new(),
+            total_bytes: 0,
+            max_txs,
+            max_bytes,
         }
     }
 
@@ -142,7 +158,7 @@ impl Mempool {
         let rate = fee.checked_div(size as u64).unwrap_or(0).max(1);
 
         // If full, consider eviction of lowest fee-rate tx.
-        if self.txs.len() >= MAX_MEMPOOL_TXS || self.total_bytes + size > MAX_MEMPOOL_BYTES {
+        if self.txs.len() >= self.max_txs || self.total_bytes + size > self.max_bytes {
             if let Some((lowest_id, lowest_rate, lowest_size)) = self.lowest_fee_rate() {
                 if rate <= lowest_rate {
                     return Err(SubmitError::PoolFull);
@@ -278,14 +294,14 @@ fn tx_sighash(tx: &Transaction, resolved_inputs: &[(u64, [u8; 20], &Vec<u8>, &Ve
     h.finalize().as_bytes().to_vec()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use k256::ecdsa::signature::Signer;
-    use k256::ecdsa::SigningKey;
-    use k256::EncodedPoint;
-    use k256::elliptic_curve::rand_core::OsRng;
-    use nulla_core::{TransparentInput, TransparentOutput, PROTOCOL_VERSION};
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use k256::ecdsa::signature::Signer;
+        use k256::ecdsa::SigningKey;
+        use k256::EncodedPoint;
+        use k256::elliptic_curve::rand_core::OsRng;
+        use nulla_core::{TransparentInput, TransparentOutput, PROTOCOL_VERSION};
 
     struct FakeChain {
         utxos: HashMap<OutPoint, (u64, [u8; 20])>,
@@ -334,6 +350,48 @@ mod tests {
             nullifiers: vec![],
             outputs: vec![],
             fee: Amount::from_atoms(BASE_FEE_ATOMS),
+            claimed_subsidy: Amount::zero(),
+            claimed_fees: Amount::zero(),
+            proof: vec![],
+            memo: vec![],
+        };
+        let resolved = vec![(
+            prev_value,
+            pk_hash,
+            &tx.transparent_inputs[0].pubkey,
+            &tx.transparent_inputs[0].sig,
+            &tx.transparent_inputs[0].prevout,
+        )];
+        let sig = sign_tx(sk, &tx, &resolved);
+        tx.transparent_inputs[0].sig = sig;
+        tx
+    }
+
+    fn make_tx_with_fee(
+        sk: &SigningKey,
+        prev: OutPoint,
+        prev_value: u64,
+        fee: u64,
+    ) -> Transaction {
+        let pubkey = Vec::from(EncodedPoint::from(sk.verifying_key()).as_bytes());
+        let pk_hash = p2pkh_hash(&pubkey);
+        let output_value = prev_value.saturating_sub(fee).saturating_sub(1);
+        let mut tx = Transaction {
+            version: PROTOCOL_VERSION,
+            kind: TransactionKind::Regular,
+            transparent_inputs: vec![TransparentInput {
+                prevout: prev,
+                pubkey: pubkey.clone(),
+                sig: vec![],
+            }],
+            transparent_outputs: vec![TransparentOutput {
+                value: Amount::from_atoms(output_value),
+                pubkey_hash: pk_hash,
+            }],
+            anchor_root: Hash32::zero(),
+            nullifiers: vec![],
+            outputs: vec![],
+            fee: Amount::from_atoms(fee),
             claimed_subsidy: Amount::zero(),
             claimed_fees: Amount::zero(),
             proof: vec![],
@@ -514,5 +572,60 @@ mod tests {
         let mut mempool = Mempool::new();
         let err = mempool.submit_tx(&chain, tx).unwrap_err();
         matches!(err, SubmitError::InsufficientInputValue);
+    }
+
+    #[test]
+    fn evicts_lowest_fee_rate_when_full() {
+        let sk = SigningKey::random(&mut OsRng);
+        let pubkey = Vec::from(EncodedPoint::from(sk.verifying_key()).as_bytes());
+        let pk_hash = p2pkh_hash(&pubkey);
+        let mut chain = FakeChain {
+            utxos: HashMap::new(),
+        };
+        // Two UTXOs for two inputs.
+        let prev1 = OutPoint { txid: Hash32::from([1u8;32]), vout: 0 };
+        let prev2 = OutPoint { txid: Hash32::from([2u8;32]), vout: 0 };
+        let prev3 = OutPoint { txid: Hash32::from([3u8;32]), vout: 0 };
+        chain.utxos.insert(prev1, (10_000, pk_hash));
+        chain.utxos.insert(prev2, (10_000, pk_hash));
+        chain.utxos.insert(prev3, (10_000, pk_hash));
+
+        let mut mempool = Mempool::with_limits(2, 10_000); // tiny for test
+
+        let tx_low = make_tx_with_fee(&sk, prev1, 10_000, BASE_FEE_ATOMS); // low fee
+        let low_id = mempool.submit_tx(&chain, tx_low).expect("low ok");
+
+        let tx_mid = make_tx_with_fee(&sk, prev2, 10_000, BASE_FEE_ATOMS * 2);
+        let mid_id = mempool.submit_tx(&chain, tx_mid).expect("mid ok");
+
+        // Now pool full; submit high-fee should evict lowest (low_id).
+        let tx_high = make_tx_with_fee(&sk, prev3, 10_000, BASE_FEE_ATOMS * 4);
+        let high_id = mempool.submit_tx(&chain, tx_high).expect("high ok");
+
+        assert!(mempool.has_tx(&mid_id));
+        assert!(mempool.has_tx(&high_id));
+        assert!(!mempool.has_tx(&low_id));
+    }
+
+    #[test]
+    fn pool_full_rejects_lower_fee_rate() {
+        let sk = SigningKey::random(&mut OsRng);
+        let pubkey = Vec::from(EncodedPoint::from(sk.verifying_key()).as_bytes());
+        let pk_hash = p2pkh_hash(&pubkey);
+        let mut chain = FakeChain {
+            utxos: HashMap::new(),
+        };
+        let prev1 = OutPoint { txid: Hash32::from([4u8;32]), vout: 0 };
+        let prev2 = OutPoint { txid: Hash32::from([5u8;32]), vout: 0 };
+        chain.utxos.insert(prev1, (10_000, pk_hash));
+        chain.utxos.insert(prev2, (10_000, pk_hash));
+
+        let mut mempool = Mempool::with_limits(1, 5_000); // single slot
+        let tx_high = make_tx_with_fee(&sk, prev1, 10_000, BASE_FEE_ATOMS * 4);
+        mempool.submit_tx(&chain, tx_high).expect("high ok");
+
+        let tx_low = make_tx_with_fee(&sk, prev2, 10_000, BASE_FEE_ATOMS);
+        let err = mempool.submit_tx(&chain, tx_low).unwrap_err();
+        matches!(err, SubmitError::PoolFull);
     }
 }

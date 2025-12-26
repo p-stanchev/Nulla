@@ -24,6 +24,8 @@ Nulla is a privacy-first Proof-of-Work blockchain written in Rust. It targets pr
 - P2P tx relay: inv/get_tx/tx wired through the single mempool validation path.
 - Optional seed URL: `--seed-url`/`NULLA_SEED_URL` fetches a JSON list of peers from a VPS/bootstrap endpoint.
 - Fork mitigation: initial-sync gate + follower mode reduce accidental forks; consensus still resolves forks via heaviest work (forks cannot be eliminated entirely in PoW).
+- P2P safety caps: msg size 1MB, max 64 headers/response, max 1024 inv-tx entries, max 32 block requests, per-peer rate limit ~200 msgs/sec with ban score.
+- Mempool caps: max 5000 txs or ~5MB total; min relay fee > 0; evicts lowest fee-rate when full (policy, not consensus).
 
 ---
 
@@ -117,10 +119,29 @@ Mainnet prep notes: see `docs/mainnet-plan.md` (chain ID 0, policy, launch check
 - Wrong miner address: start the node with the address shown by `cargo run -p nulla-wallet -- --wallet-db <db> addr`.
 - RPC refused: start the node first (default RPC 127.0.0.1:27445), or pass `--rpc <addr>`/`--rpc-auth-token <token>`.
 - Command syntax: only one `--` between cargo and wallet args, e.g. `cargo run -p nulla-wallet -- --wallet-db my.db rescan`.
+- Bootstrap seeds: default includes `45.155.53.102:27444`; more seeds to be added. You can override with `--peers`/`NULLA_PEERS` or `--seeds`/`NULLA_SEEDS`.
 
 Notes:
 - Tx relay uses P2P inv/get_tx/tx; wallets still talk to the local node via RPC.
 - No zk, no pools, no explorers, no Stratum yet.
+
+Two-node sanity (ops quickcheck)
+```
+# Node A (miner)
+cargo run -p nulla-node -- --miner-address <addrA>
+
+# Node B (follower, no mining)
+NULLA_LISTEN=127.0.0.1:27446 \
+NULLA_PEERS=127.0.0.1:27444 \
+NULLA_RPC_LISTEN=127.0.0.1:27447 \
+cargo run -p nulla-node -- --no-mine
+
+# Wallet A: init + send via node A RPC
+cargo run -p nulla-wallet -- --rpc 127.0.0.1:27445 send --to <addrB> --amount <atoms>
+# Mine a block on A, then:
+cargo run -p nulla-wallet -- --rpc 127.0.0.1:27447 --wallet-db walletB.db rescan
+```
+Expected: Node B sees the block/tx after A mines; walletB balance updates.
 ## Testing
 
 ```bash
