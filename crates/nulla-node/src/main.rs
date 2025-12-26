@@ -57,6 +57,9 @@ struct Config {
     /// Attempt NAT-PMP/UPnP port mapping for the listen port (opt-in).
     #[arg(long = "nat")]
     nat: bool,
+    /// Enable addr gossip (optional; default off).
+    #[arg(long = "gossip")]
+    gossip: bool,
     /// Path to ChainDB (sled)
     #[arg(long = "db")]
     db: Option<PathBuf>,
@@ -102,6 +105,10 @@ fn main() {
         },
     )
     .expect("p2p init");
+    if cfg.gossip_enabled {
+        p2p.enable_gossip(true);
+        println!("Gossip-lite enabled (non-critical)");
+    }
     {
         let db = Arc::clone(&chain_db);
         p2p.set_block_callback(move |block| db.store_block_if_index_matches(block));
@@ -145,6 +152,8 @@ fn main() {
         });
     }
     let is_syncing = Arc::new(AtomicBool::new(true));
+    let mining_ready = Arc::new(AtomicBool::new(false));
+    let mining_block_reason: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     {
         let chain_for_cb = Arc::clone(&chain);
         let mem_for_cb = Arc::clone(&mempool);
@@ -178,7 +187,15 @@ fn main() {
         });
     }
     let _ =
-        rpc::serve_rpc(&rpc_listen, rpc_auth, Arc::clone(&chain), Arc::clone(&mempool), Arc::clone(&p2p));
+        rpc::serve_rpc(
+            &rpc_listen,
+            rpc_auth,
+            Arc::clone(&chain),
+            Arc::clone(&mempool),
+            Arc::clone(&p2p),
+            Arc::clone(&mining_ready),
+            Arc::clone(&mining_block_reason),
+        );
     println!("RPC listening on {rpc_listen}");
 
     // -----------------
@@ -235,6 +252,10 @@ fn main() {
         }
 
         if let Some(reason) = block_reason {
+            mining_ready.store(false, Ordering::Relaxed);
+            if let Ok(mut r) = mining_block_reason.lock() {
+                *r = Some(reason.clone());
+            }
             if last_block_reason.as_ref() != Some(&reason) {
                 println!("Mining paused: {reason}");
                 last_block_reason = Some(reason);
@@ -248,6 +269,10 @@ fn main() {
             );
             mining_gate_active = false;
             last_block_reason = None;
+            mining_ready.store(true, Ordering::Relaxed);
+            if let Ok(mut r) = mining_block_reason.lock() {
+                *r = None;
+            }
         }
 
         // Drain any locally submitted transactions (file dropbox).
@@ -704,6 +729,8 @@ fn resolve_config(cli: Config) -> ResolvedConfig {
         mining_enabled = false;
     }
 
+    let gossip_enabled = cli.gossip || env::var("NULLA_GOSSIP").is_ok();
+
     ResolvedConfig {
         listen,
         peers,
@@ -715,6 +742,7 @@ fn resolve_config(cli: Config) -> ResolvedConfig {
         miner_addr_b58,
         mining_enabled,
         nat_enabled: cli.nat || env::var("NULLA_NAT").is_ok(),
+        gossip_enabled,
     }
 }
 
@@ -729,6 +757,7 @@ struct ResolvedConfig {
     miner_addr_b58: String,
     mining_enabled: bool,
     nat_enabled: bool,
+    gossip_enabled: bool,
 }
 
 fn compute_best_chain_and_missing(db: &ChainDb) -> (Hash32, Vec<Hash32>, Vec<Hash32>) {

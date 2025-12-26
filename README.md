@@ -26,6 +26,7 @@ Nulla is a privacy-first Proof-of-Work blockchain written in Rust. It targets pr
 - Fork mitigation: initial-sync gate + follower mode reduce accidental forks; consensus still resolves forks via heaviest work (forks cannot be eliminated entirely in PoW).
 - P2P safety caps: msg size 1MB, max 64 headers/response, max 1024 inv-tx entries, max 32 block requests, per-peer rate limit ~200 msgs/sec with ban score.
 - Mempool caps: max 5000 txs or ~5MB total; min relay fee > 0; evicts lowest fee-rate when full (policy, not consensus).
+- Gossip-lite (optional, default off): `--gossip` exchanges addr/getaddr with hard caps (256 addrs/response, 2k table, 7d expiry); only public IPs/port!=0; never required for sync.
 
 ---
 
@@ -157,6 +158,9 @@ cargo run -p nulla-wallet -- --rpc 127.0.0.1:27445 send --to <addrB> --amount <a
 cargo run -p nulla-wallet -- --rpc 127.0.0.1:27447 --wallet-db walletB.db rescan
 ```
 Expected: Node B sees the block/tx after A mines; walletB balance updates.
+
+Launch checklist
+- See `docs/launch-checklist.md` for seed ops, tagging, binary release, and Genesis-week messaging.
 ## Testing
 
 ```bash

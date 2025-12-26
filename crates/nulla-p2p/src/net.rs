@@ -24,6 +24,10 @@ const MAX_HEADERS: usize = 64;
 const MAX_INV_TX: usize = 1024;
 const MAX_BLOCK_REQ: usize = 32;
 const MAX_MSGS_PER_SEC: u32 = 200;
+const MAX_ADDR_RESP: usize = 256;
+const MAX_ADDR_TABLE: usize = 2000;
+const ADDR_EXPIRY_SECS: u64 = 7 * 24 * 3600;
+const TARGET_PEERS_FOR_GOSSIP: usize = 8;
 
 #[derive(Debug, Error)]
 pub enum P2pError {
@@ -351,6 +355,14 @@ pub struct Version {
 }
 
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
+pub struct NetAddr {
+    pub ip: [u8; 16],   // IPv4-mapped allowed
+    pub port: u16,
+    pub last_seen: u64, // unix seconds
+    pub services: u32,
+}
+
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub enum Message {
     Version(Version),
     Verack,
@@ -366,6 +378,8 @@ pub enum Message {
     InvTx(Vec<Hash32>),
     GetTx(Hash32),
     Tx(Transaction),
+    GetAddr { max: u16 },
+    Addr(Vec<NetAddr>),
 }
 
 #[derive(Default)]
@@ -377,6 +391,7 @@ struct PeerState {
     score: u32,
     msg_count: u32,
     window_start: Option<Instant>,
+    sent_getaddr: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -400,6 +415,8 @@ pub struct P2pEngine {
     outbound: HashMap<u64, mpsc::Sender<Message>>,
     next_peer_id: u64,
     policy: Policy,
+    gossip_enabled: bool,
+    addr_book: HashMap<SocketAddr, u64>, // last_seen
     on_block: Option<Arc<dyn Fn(&Block) -> Result<(), String> + Send + Sync>>,
     on_tx: Option<Arc<dyn Fn(&Transaction) -> Result<(), String> + Send + Sync>>,
     has_tx: Option<Arc<dyn Fn(&Hash32) -> bool + Send + Sync>>,
@@ -414,6 +431,8 @@ impl P2pEngine {
             outbound: HashMap::new(),
             next_peer_id: 0,
             policy: Policy::default(),
+            gossip_enabled: false,
+            addr_book: HashMap::new(),
             on_block: None,
             on_tx: None,
             has_tx: None,
@@ -428,6 +447,8 @@ impl P2pEngine {
             outbound: HashMap::new(),
             next_peer_id: 0,
             policy,
+            gossip_enabled: false,
+            addr_book: HashMap::new(),
             on_block: None,
             on_tx: None,
             has_tx: None,
@@ -437,6 +458,10 @@ impl P2pEngine {
 
     pub fn set_policy(&mut self, policy: Policy) {
         self.policy = policy;
+    }
+
+    pub fn enable_gossip(&mut self, enabled: bool) {
+        self.gossip_enabled = enabled;
     }
 
     pub fn best_hash(&self) -> Hash32 {
@@ -511,6 +536,75 @@ impl P2pEngine {
         }
     }
 
+    fn insert_addr(&mut self, addr: SocketAddr, now: u64) {
+        if self.addr_book.len() >= MAX_ADDR_TABLE {
+            // simple LRU-ish: drop oldest
+            if let Some(oldest) = self
+                .addr_book
+                .iter()
+                .min_by_key(|(_, ts)| *ts)
+                .map(|(k, _)| *k)
+            {
+                self.addr_book.remove(&oldest);
+            }
+        }
+        self.addr_book.insert(addr, now);
+    }
+
+    fn collect_addrs(&self, max: usize, now: u64) -> Vec<NetAddr> {
+        let mut out = Vec::new();
+        for (addr, ts) in self.addr_book.iter() {
+            if out.len() >= max {
+                break;
+            }
+            if now.saturating_sub(*ts) > ADDR_EXPIRY_SECS {
+                continue;
+            }
+            match addr {
+                SocketAddr::V4(v4) => {
+                    let mut ip = [0u8; 16];
+                    ip[10] = 0xff;
+                    ip[11] = 0xff;
+                    ip[12..16].copy_from_slice(&v4.ip().octets());
+                    out.push(NetAddr {
+                        ip,
+                        port: v4.port(),
+                        last_seen: *ts,
+                        services: 0,
+                    });
+                }
+                SocketAddr::V6(v6) => {
+                    out.push(NetAddr {
+                        ip: v6.ip().octets(),
+                        port: v6.port(),
+                        last_seen: *ts,
+                        services: 0,
+                    });
+                }
+            }
+        }
+        out
+    }
+
+    fn valid_gossip_addr(addr: &SocketAddr) -> bool {
+        match addr {
+            SocketAddr::V4(v4) => {
+                let ip = v4.ip();
+                if ip.is_loopback() || ip.is_link_local() || ip.is_private() {
+                    return false;
+                }
+                v4.port() != 0
+            }
+            SocketAddr::V6(v6) => {
+                let ip = v6.ip();
+                if ip.is_loopback() || ip.is_unique_local() || ip.is_unspecified() || ip.is_multicast() {
+                    return false;
+                }
+                v6.port() != 0
+            }
+        }
+    }
+
     fn policy_allows_reorg(&self, prev: &Hash32) -> Result<(), P2pError> {
         if let Some(limit) = self.policy.max_reorg_depth {
             if let Some(prev_height) = self.store.height_of(prev) {
@@ -573,9 +667,15 @@ impl P2pEngine {
                 Ok(out)
             }
             Message::Verack => {
+                let peer_count = self.peers.len();
                 let peer = self.peers.entry(peer_id).or_default();
                 peer.verack_seen = true;
-                Ok(Vec::new())
+                let mut out = Vec::new();
+                if self.gossip_enabled && peer_count < TARGET_PEERS_FOR_GOSSIP {
+                    peer.sent_getaddr = true;
+                    out.push((peer_id, Message::GetAddr { max: 128 }));
+                }
+                Ok(out)
             }
             Message::Ping(nonce) => Ok(vec![(peer_id, Message::Pong(nonce))]),
             Message::Pong(_) => Ok(Vec::new()),
@@ -703,6 +803,50 @@ impl P2pEngine {
                 }
                 Ok(out)
             }
+            Message::GetAddr { max } => {
+                if !self.gossip_enabled {
+                    return Ok(Vec::new());
+                }
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                let max = max.min(MAX_ADDR_RESP as u16) as usize;
+                let addrs = self.collect_addrs(max, now);
+                Ok(vec![(peer_id, Message::Addr(addrs))])
+            }
+            Message::Addr(addrs) => {
+                let mut out = Vec::new();
+                let peer = self.peers.entry(peer_id).or_default();
+                if !self.gossip_enabled || !peer.sent_getaddr {
+                    return Ok(out);
+                }
+                if addrs.len() > MAX_ADDR_RESP {
+                    return Ok(out);
+                }
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                for na in addrs {
+                    let addr = match na.ip {
+                        ip if ip[0..12] == [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff] => {
+                            let mut oct = [0u8; 4];
+                            oct.copy_from_slice(&ip[12..16]);
+                            SocketAddr::from((std::net::Ipv4Addr::from(oct), na.port))
+                        }
+                        ip => SocketAddr::from((std::net::Ipv6Addr::from(ip), na.port)),
+                    };
+                    if !Self::valid_gossip_addr(&addr) {
+                        continue;
+                    }
+                    if now.saturating_sub(na.last_seen) > ADDR_EXPIRY_SECS {
+                        continue;
+                    }
+                    self.insert_addr(addr, na.last_seen);
+                }
+                Ok(out)
+            }
         }
     }
 
@@ -738,11 +882,23 @@ impl P2pEngine {
     pub fn serve_incoming(engine: Arc<Mutex<P2pEngine>>, listener: TcpListener) -> thread::JoinHandle<()> {
         thread::spawn(move || {
             for stream in listener.incoming().flatten() {
+                let peer_addr = stream.peer_addr().ok();
                 let _ = stream.set_nodelay(true);
                 let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
                 let (tx_out, rx_out) = mpsc::channel::<Message>();
                 let mut guard = engine.lock().expect("engine");
                 let peer_id = guard.next_peer_id();
+                if guard.gossip_enabled {
+                    if let Some(pa) = peer_addr {
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs();
+                        if Self::valid_gossip_addr(&pa) {
+                            guard.insert_addr(pa, now);
+                        }
+                    }
+                }
                 guard.outbound.insert(peer_id, tx_out.clone());
                 drop(guard);
                 let eng = Arc::clone(&engine);
@@ -798,6 +954,13 @@ impl P2pEngine {
             .map_err(|e| P2pError::Io(e.to_string()))?;
         let (peer_id, locator, height) = {
             let mut eng = engine.lock().expect("engine");
+            if eng.gossip_enabled && P2pEngine::valid_gossip_addr(&addr) {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                eng.insert_addr(addr, now);
+            }
             (eng.next_peer_id(), eng.store.locator(), eng.best_entry().height)
         };
 

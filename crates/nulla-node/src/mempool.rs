@@ -164,6 +164,12 @@ impl Mempool {
                     return Err(SubmitError::PoolFull);
                 }
                 // evict lowest
+                eprintln!(
+                    "mempool: evicting tx {} (fee_rate {}), new fee_rate {}",
+                    hex::encode(lowest_id.as_bytes()),
+                    lowest_rate,
+                    rate
+                );
                 if let Some(entry) = self.txs.remove(&lowest_id) {
                     self.total_bytes = self.total_bytes.saturating_sub(entry.size);
                     for inp in entry.tx.transparent_inputs {

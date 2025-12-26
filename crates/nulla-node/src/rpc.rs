@@ -11,6 +11,8 @@ use crate::{decode_address, submit_tx_to_node};
 use crate::mempool::Mempool;
 use nulla_p2p::net::P2pEngine;
 use crate::ChainStore;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 
 fn parse_pubkey_hash(v: &Value) -> Result<[u8; 20], String> {
     if let Some(addr) = v.get("address").and_then(|a| a.as_str()) {
@@ -28,6 +30,8 @@ pub fn serve_rpc(
     chain: Arc<Mutex<ChainStore>>,
     mempool: Arc<Mutex<Mempool>>,
     p2p: Arc<Mutex<P2pEngine>>,
+    mining_ready: Arc<AtomicBool>,
+    mining_block_reason: Arc<Mutex<Option<String>>>,
 ) -> std::io::Result<()> {
     let listener = TcpListener::bind(addr)?;
     thread::spawn(move || {
@@ -36,8 +40,20 @@ pub fn serve_rpc(
                 let chain = Arc::clone(&chain);
                 let mempool = Arc::clone(&mempool);
                 let p2p = Arc::clone(&p2p);
+                let mining_ready = Arc::clone(&mining_ready);
+                let mining_block_reason = Arc::clone(&mining_block_reason);
                 let auth_token = auth_token.clone();
-                thread::spawn(move || handle_client(stream, auth_token, chain, mempool, p2p));
+                thread::spawn(move || {
+                    handle_client(
+                        stream,
+                        auth_token,
+                        chain,
+                        mempool,
+                        p2p,
+                        mining_ready,
+                        mining_block_reason,
+                    )
+                });
             }
         }
     });
@@ -50,6 +66,8 @@ fn handle_client(
     chain: Arc<Mutex<ChainStore>>,
     mempool: Arc<Mutex<Mempool>>,
     p2p: Arc<Mutex<P2pEngine>>,
+    mining_ready: Arc<AtomicBool>,
+    mining_block_reason: Arc<Mutex<Option<String>>>,
 ) {
     let mut reader = BufReader::new(stream.try_clone().unwrap());
     let mut line = String::new();
@@ -58,7 +76,15 @@ fn handle_client(
             break;
         }
         let resp = match serde_json::from_str::<Value>(&line) {
-            Ok(v) => handle_request(v, &auth_token, &chain, &mempool, &p2p),
+            Ok(v) => handle_request(
+                v,
+                &auth_token,
+                &chain,
+                &mempool,
+                &p2p,
+                &mining_ready,
+                &mining_block_reason,
+            ),
             Err(_) => json!({"ok": false, "error": "invalid json"}),
         };
         line.clear();
@@ -74,6 +100,8 @@ fn handle_request(
     chain: &Arc<Mutex<ChainStore>>,
     mempool: &Arc<Mutex<Mempool>>,
     p2p: &Arc<Mutex<P2pEngine>>,
+    mining_ready: &Arc<AtomicBool>,
+    mining_block_reason: &Arc<Mutex<Option<String>>>,
 ) -> Value {
     if let Some(expected) = auth_token {
         match v.get("auth").and_then(|a| a.as_str()) {
@@ -95,11 +123,18 @@ fn handle_request(
                 let net = p2p.lock().expect("p2p");
                 net.peer_count()
             };
+            let ready = mining_ready.load(Ordering::Relaxed);
+            let reason = mining_block_reason
+                .lock()
+                .ok()
+                .and_then(|r| r.clone());
             json!({
                 "ok": true,
                 "height": best.height,
                 "best_hash": hex::encode(crate::block_hash(&best.block).as_bytes()),
                 "peers": peer_count,
+                "can_mine": ready,
+                "mining_block_reason": reason,
             })
         }
         "get_peer_stats" => {
