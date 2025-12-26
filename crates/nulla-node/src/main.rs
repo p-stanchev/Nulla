@@ -210,7 +210,7 @@ fn main() {
     // -----------------
     let mut height = 1u64;
     let mut mining_gate_active = true;
-    let min_peers_for_mining = 3usize;
+    let min_peers_for_mining = 2usize;
     let sync_stable_secs = 90u64;
     let mut sync_stable_since: Option<std::time::Instant> = None;
     let mut last_block_reason: Option<String> = None;
