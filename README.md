@@ -58,8 +58,29 @@ Each crate owns a single responsibility; there are no circular dependencies.
 ## Getting Started (beginner friendly)
 
 Node (must be running for wallet operations)
-- Start + mine to your address (PowerShell/cmd):  
-  `cargo run -p nulla-node -- --miner-address <Base58 addr>`
+- Miner example (Linux/macOS shell):
+  ```bash
+  RUST_LOG=info NULLA_RPC_LISTEN=127.0.0.1:27447 \
+  cargo run -p nulla-node -- \
+    --mine \
+    --miner-address <Base58 addr> \
+    --listen 0.0.0.0:27446 \
+    --db nulla.chain.miner.db \
+    --gossip \
+    --peers 45.155.53.102:27444,45.155.53.112:27444,45.155.53.126:27444
+  ```
+- Miner example (Windows PowerShell):
+  ```powershell
+  $env:NULLA_RPC_LISTEN = "127.0.0.1:27447"
+  $env:RUST_LOG = "info"
+  cargo run -p nulla-node -- `
+    --mine `
+    --miner-address <Base58 addr> `
+    --listen 0.0.0.0:27446 `
+    --db nulla.chain.miner.db `
+    --gossip `
+    --peers 45.155.53.102:27444,45.155.53.112:27444,45.155.53.126:27444
+  ```
 - Defaults (mainnet-ready): listen `0.0.0.0:27444`, db `./nulla.chain.db`, reorg-cap `100`.  
   Env fallbacks: `NULLA_LISTEN`, `NULLA_PEERS`, `NULLA_SEEDS`, `NULLA_DB`, `NULLA_REORG_CAP`, `NULLA_MINER_ADDRESS`, `NULLA_NO_MINE`.
 - RPC: `NULLA_RPC_LISTEN=127.0.0.1:27445` (default), `NULLA_RPC_AUTH_TOKEN` optional.
