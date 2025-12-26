@@ -28,7 +28,8 @@ use nulla_p2p::net::{Message, P2pEngine, Policy};
 use nulla_state::{block_subsidy, LedgerState};
 use mempool::{Mempool, SubmitError as MempoolSubmitError};
 
-/// Extremely easy difficulty for devnet.
+/// Extremely easy difficulty for devnet (currently unused; retained for debug).
+#[allow(dead_code)]
 const DEVNET_BITS: u32 = GENESIS_BITS;
 
 /// Node configuration resolved from CLI/env/defaults.
@@ -175,6 +176,7 @@ fn main() {
     // Main mining loop (gated on sync/mining_enabled)
     // -----------------
     let mut height = 1u64;
+    let mut mining_gate_active = true;
     loop {
         let best_height = { chain.lock().expect("chain lock").best_entry().height };
         let peer_height = { p2p.lock().expect("p2p").best_peer_height() };
@@ -183,8 +185,21 @@ fn main() {
 
         // Hold mining and mempool work until synced.
         if syncing || !cfg.mining_enabled {
+            if cfg.mining_enabled && mining_gate_active {
+                println!(
+                    "Syncing... holding mining (local height {}, best peer {})",
+                    best_height, peer_height
+                );
+            }
             thread::sleep(Duration::from_millis(50));
             continue;
+        }
+        if mining_gate_active && cfg.mining_enabled {
+            println!(
+                "Sync complete (local height {}, best peer {}); mining enabled",
+                best_height, peer_height
+            );
+            mining_gate_active = false;
         }
 
         // Drain any locally submitted transactions (file dropbox).
@@ -549,10 +564,16 @@ fn resolve_config(cli: Config) -> ResolvedConfig {
         .filter(|s| !s.trim().is_empty())
         .filter_map(|s| s.trim().parse().ok())
         .collect::<Vec<_>>();
-    // If no seeds/peers are provided, fall back to a default public seed.
+    // If no seeds/peers are provided, fall back to default public seeds.
     if seeds.is_empty() && peers.is_empty() {
-        if let Ok(addr) = "45.155.53.102:27444".parse() {
-            seeds.push(addr);
+        for s in &[
+            "45.155.53.102:27444",
+            "45.155.53.112:27444",
+            "45.155.53.126:27444",
+        ] {
+            if let Ok(addr) = s.parse() {
+                seeds.push(addr);
+            }
         }
     }
     // Optional seed URL fetch (JSON array of strings).

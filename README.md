@@ -119,7 +119,7 @@ Mainnet prep notes: see `docs/mainnet-plan.md` (chain ID 0, policy, launch check
 - Wrong miner address: start the node with the address shown by `cargo run -p nulla-wallet -- --wallet-db <db> addr`.
 - RPC refused: start the node first (default RPC 127.0.0.1:27445), or pass `--rpc <addr>`/`--rpc-auth-token <token>`.
 - Command syntax: only one `--` between cargo and wallet args, e.g. `cargo run -p nulla-wallet -- --wallet-db my.db rescan`.
-- Bootstrap seeds: default includes `45.155.53.102:27444`; more seeds to be added. You can override with `--peers`/`NULLA_PEERS` or `--seeds`/`NULLA_SEEDS`.
+- Bootstrap seeds: defaults include `45.155.53.102:27444`, `45.155.53.112:27444`, `45.155.53.126:27444`. You can override with `--peers`/`NULLA_PEERS` or `--seeds`/`NULLA_SEEDS`.
 
 Notes:
 - Tx relay uses P2P inv/get_tx/tx; wallets still talk to the local node via RPC.
