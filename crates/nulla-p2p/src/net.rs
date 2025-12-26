@@ -4,7 +4,7 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::Path;
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use borsh::{to_vec, BorshDeserialize, BorshSerialize};
 use nulla_consensus::{
@@ -19,6 +19,11 @@ const TREE_HEADERS: &str = "headers";
 const TREE_META: &str = "meta";
 const TREE_BLOCKS: &str = "blocks";
 const KEY_BEST: &[u8] = b"best";
+const MAX_MSG_LEN: usize = 1 * 1024 * 1024; // 1MB hard cap
+const MAX_HEADERS: usize = 64;
+const MAX_INV_TX: usize = 1024;
+const MAX_BLOCK_REQ: usize = 32;
+const MAX_MSGS_PER_SEC: u32 = 200;
 
 #[derive(Debug, Error)]
 pub enum P2pError {
@@ -370,6 +375,8 @@ struct PeerState {
     disconnected: bool,
     height: u64,
     score: u32,
+    msg_count: u32,
+    window_start: Option<Instant>,
 }
 
 #[derive(Clone, Copy)]
@@ -448,6 +455,10 @@ impl P2pEngine {
             .unwrap_or(self.store.best_entry().height)
     }
 
+    pub fn peer_count(&self) -> usize {
+        self.peers.values().filter(|p| !p.disconnected).count()
+    }
+
     pub fn next_peer_id(&mut self) -> u64 {
         let id = self.next_peer_id;
         self.next_peer_id = self.next_peer_id.wrapping_add(1);
@@ -520,6 +531,27 @@ impl P2pEngine {
         peer_id: u64,
         msg: Message,
     ) -> Result<Vec<(u64, Message)>, P2pError> {
+        {
+            let peer = self.peers.entry(peer_id).or_default();
+            // Simple rate limit: MAX_MSGS_PER_SEC per peer.
+            let now = Instant::now();
+            if let Some(start) = peer.window_start {
+                if now.duration_since(start) > Duration::from_secs(1) {
+                    peer.window_start = Some(now);
+                    peer.msg_count = 0;
+                }
+            } else {
+                peer.window_start = Some(now);
+            }
+            peer.msg_count = peer.msg_count.saturating_add(1);
+            if peer.msg_count > MAX_MSGS_PER_SEC {
+                peer.score = peer.score.saturating_add(1);
+                if peer.score >= self.policy.ban_threshold {
+                    peer.disconnected = true;
+                }
+                return Err(P2pError::Policy("rate limit exceeded".into()));
+            }
+        }
         if self
             .peers
             .get(&peer_id)
@@ -548,10 +580,18 @@ impl P2pEngine {
             Message::Ping(nonce) => Ok(vec![(peer_id, Message::Pong(nonce))]),
             Message::Pong(_) => Ok(Vec::new()),
             Message::GetHeaders { locator, stop } => {
-                let headers = self.store.get_headers_after(&locator, stop, 32);
+                let headers = self.store.get_headers_after(&locator, stop, MAX_HEADERS);
                 Ok(vec![(peer_id, Message::Headers(headers))])
             }
             Message::Headers(headers) => {
+                if headers.len() > MAX_HEADERS {
+                    let peer = self.peers.entry(peer_id).or_default();
+                    peer.score = peer.score.saturating_add(1);
+                    if peer.score >= self.policy.ban_threshold {
+                        peer.disconnected = true;
+                    }
+                    return Err(P2pError::Policy("too many headers".into()));
+                }
                 for h in headers {
                     let result = self
                         .policy_allows_reorg(&h.prev)
@@ -567,7 +607,7 @@ impl P2pEngine {
                     }
                 }
                 let mut out = Vec::new();
-                for h in self.store.needs_blocks_on_best(16) {
+                for h in self.store.needs_blocks_on_best(MAX_BLOCK_REQ) {
                     out.push((peer_id, Message::GetBlock(h)));
                 }
                 if let Some(peer) = self.peers.get_mut(&peer_id) {
@@ -607,6 +647,14 @@ impl P2pEngine {
                 Ok(Vec::new())
             }
             Message::InvTx(txids) => {
+                if txids.len() > MAX_INV_TX {
+                    let peer = self.peers.entry(peer_id).or_default();
+                    peer.score = peer.score.saturating_add(1);
+                    if peer.score >= self.policy.ban_threshold {
+                        peer.disconnected = true;
+                    }
+                    return Err(P2pError::Policy("too many inv tx".into()));
+                }
                 let mut unknown = Vec::new();
                 for h in txids {
                     let known = self
@@ -676,6 +724,9 @@ impl P2pEngine {
             return Err(P2pError::Io(e.to_string()));
         }
         let len = u32::from_be_bytes(len_buf) as usize;
+        if len > MAX_MSG_LEN {
+            return Err(P2pError::Policy("message too large".into()));
+        }
         let mut data = vec![0u8; len];
         stream
             .read_exact(&mut data)

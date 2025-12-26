@@ -9,6 +9,7 @@ use nulla_core::Hash32;
 
 use crate::UtxoRecord;
 
+#[derive(Clone, Debug)]
 pub struct RpcClient {
     addr: String,
     auth: Option<String>,
@@ -105,5 +106,20 @@ impl RpcClient {
             }
         }
         Ok(Err("bad txid".into()))
+    }
+
+    pub fn chain_info(&self) -> Result<Option<(u64, String, usize)>> {
+        let v = self.send(json!({"method":"get_chain_info"}))?;
+        if v.get("ok").and_then(|o| o.as_bool()) != Some(true) {
+            return Ok(None);
+        }
+        let height = v.get("height").and_then(|h| h.as_u64()).unwrap_or(0);
+        let best = v
+            .get("best_hash")
+            .and_then(|s| s.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let peers = v.get("peers").and_then(|p| p.as_u64()).unwrap_or(0) as usize;
+        Ok(Some((height, best, peers)))
     }
 }

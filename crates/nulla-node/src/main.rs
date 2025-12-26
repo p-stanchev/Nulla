@@ -549,6 +549,12 @@ fn resolve_config(cli: Config) -> ResolvedConfig {
         .filter(|s| !s.trim().is_empty())
         .filter_map(|s| s.trim().parse().ok())
         .collect::<Vec<_>>();
+    // If no seeds/peers are provided, fall back to a default public seed.
+    if seeds.is_empty() && peers.is_empty() {
+        if let Ok(addr) = "45.155.53.102:27444".parse() {
+            seeds.push(addr);
+        }
+    }
     // Optional seed URL fetch (JSON array of strings).
     if let Some(url) = cli
         .seed_url

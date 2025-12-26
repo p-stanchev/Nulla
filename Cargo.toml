@@ -8,4 +8,7 @@ members = [
   "crates/nulla-wallet",
   "crates/nulla-node",
 ]
+exclude = [
+  "apps/nulla-gui/src-tauri",
+]
 resolver = "2"

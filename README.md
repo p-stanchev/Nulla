@@ -16,12 +16,14 @@ Nulla is a privacy-first Proof-of-Work blockchain written in Rust. It targets pr
 - P2P v0: TCP header-first sync (version/verack, ping/pong, getheaders/headers), heaviest-work selection.
 - Block download: best-chain-only path with strict header<->block checks.
 - Policy layer: reorg depth cap, peer scoring/bans, basic rate limits (non-consensus).
-- Wallet: transparent CLI (keygen/address/encrypted storage/rescan/balance/list/send) via node RPC.
+- Wallet: transparent CLI (keygen/address/encrypted storage/rescan/balance/list/send) via node RPC; Tauri GUI scaffold (start/stop node, balance/UTXO view, send/rescan, address management).
 - Mempool/Fees: transparent tx acceptance wired to ChainStore UTXO view; base fee enforced; miner includes mempool txs.
 - Sync + mining gating: mining/mempool work waits until the node catches the best peer height; `--no-mine`/`NULLA_NO_MINE` for follower/seed mode.
 - Networking bootstrap: seeds supported via `--seeds`/`NULLA_SEEDS` fallback when no explicit `--peers`.
-- RPC helpers: `get_balance`/`get_utxos` accept address or pubkey hash; submit/validate/chain info unchanged.
-- P2P tx relay: inv/get_tx/tx wired through the single mempool validation path.\n- Optional seed URL: --seed-url/NULLA_SEED_URL fetches a JSON list of peers from a VPS/bootstrap endpoint.\n- Fork mitigation: initial-sync gate + follower mode reduce accidental forks; consensus still resolves forks via heaviest work (forks cannot be eliminated entirely in PoW).
+- RPC helpers: `get_balance`/`get_utxos` accept address or pubkey hash; submit/validate/chain info unchanged. RPC is newline-delimited JSON over TCP (not HTTP).
+- P2P tx relay: inv/get_tx/tx wired through the single mempool validation path.
+- Optional seed URL: `--seed-url`/`NULLA_SEED_URL` fetches a JSON list of peers from a VPS/bootstrap endpoint.
+- Fork mitigation: initial-sync gate + follower mode reduce accidental forks; consensus still resolves forks via heaviest work (forks cannot be eliminated entirely in PoW).
 
 ---
 
@@ -72,6 +74,17 @@ Wallet (RPC-only; does **not** open the node DB)
   `cargo run -p nulla-wallet -- send --to <addr> --amount <atoms>`
 - Common flags: `--wallet-db <path>` (default `nulla.wallet.db`), `--rpc <addr>` (default `127.0.0.1:27445`), `--rpc-auth-token <token>` if the node requires it.
 - Command syntax: keep a single `--` between cargo and wallet args; do **not** place an extra `--` before the subcommand (e.g., `cargo run -p nulla-wallet -- --wallet-db my.db rescan`).
+
+GUI (Tauri preview; TCP JSON RPC)
+- Location: `apps/nulla-gui`. Uses the wallet library directly and talks to the node over TCP JSON (not HTTP).
+- Run:  
+  ```bash
+  cd apps/nulla-gui
+  npm install   # first time
+  npm run tauri dev
+  ```
+- Features: set node RPC/auth, pick wallet DB, start/stop node (`--no-mine` default), view height/peers/best hash, show/generate address, balance/UTXO list, rescan, send tx.
+- Ports: frontend dev URL `http://localhost:1421`; node RPC default `127.0.0.1:27445` (newline-delimited JSON). If you change `NULLA_RPC_LISTEN`, update the GUI settings to match.
 
 Two-node example (header + block + tx relay)
 ```bash

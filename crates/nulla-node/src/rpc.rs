@@ -91,10 +91,22 @@ fn handle_request(
         "get_chain_info" => {
             let chain = chain.lock().expect("chain");
             let best = chain.best_entry();
+            let peer_count = {
+                let net = p2p.lock().expect("p2p");
+                net.peer_count()
+            };
             json!({
                 "ok": true,
                 "height": best.height,
                 "best_hash": hex::encode(crate::block_hash(&best.block).as_bytes()),
+                "peers": peer_count,
+            })
+        }
+        "get_peer_stats" => {
+            let net = p2p.lock().expect("p2p");
+            json!({
+                "ok": true,
+                "peers": net.peer_count(),
             })
         }
         "get_utxos" => {
