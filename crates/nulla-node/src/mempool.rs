@@ -11,6 +11,9 @@ pub trait ChainView {
 
 /// Node policy: minimum fee per transaction (atoms). Not consensus.
 pub const BASE_FEE_ATOMS: u64 = 1000;
+/// Node policy: max mempool size (count and total serialized bytes). Not consensus.
+const MAX_MEMPOOL_TXS: usize = 5000;
+const MAX_MEMPOOL_BYTES: usize = 5_000_000;
 
 #[derive(Debug)]
 pub enum SubmitError {
@@ -24,11 +27,20 @@ pub enum SubmitError {
     InsufficientInputValue,
     BadSignature,
     TooLarge,
+    PoolFull,
+}
+
+#[derive(Clone)]
+struct MemEntry {
+    tx: Transaction,
+    size: usize,
+    fee_rate: u64, // atoms per byte (floor)
 }
 
 pub struct Mempool {
-    txs: HashMap<TxId, Transaction>,
+    txs: HashMap<TxId, MemEntry>,
     spent: HashMap<OutPoint, TxId>,
+    total_bytes: usize,
 }
 
 impl Mempool {
@@ -36,6 +48,7 @@ impl Mempool {
         Self {
             txs: HashMap::new(),
             spent: HashMap::new(),
+            total_bytes: 0,
         }
     }
 
@@ -56,6 +69,8 @@ impl Mempool {
         if tx.transparent_inputs.len() > 10_000 || tx.transparent_outputs.len() > 10_000 {
             return Err(SubmitError::TooLarge);
         }
+        let ser = borsh::to_vec(&tx).map_err(|_| SubmitError::InvalidFormat("encode"))?;
+        let size = ser.len();
 
         // duplicate input check
         let mut seen_inputs = HashSet::new();
@@ -123,18 +138,50 @@ impl Mempool {
             return Err(SubmitError::DuplicateTx);
         }
 
+        // fee rate for eviction policy
+        let rate = fee.checked_div(size as u64).unwrap_or(0).max(1);
+
+        // If full, consider eviction of lowest fee-rate tx.
+        if self.txs.len() >= MAX_MEMPOOL_TXS || self.total_bytes + size > MAX_MEMPOOL_BYTES {
+            if let Some((lowest_id, lowest_rate, lowest_size)) = self.lowest_fee_rate() {
+                if rate <= lowest_rate {
+                    return Err(SubmitError::PoolFull);
+                }
+                // evict lowest
+                if let Some(entry) = self.txs.remove(&lowest_id) {
+                    self.total_bytes = self.total_bytes.saturating_sub(entry.size);
+                    for inp in entry.tx.transparent_inputs {
+                        self.spent.remove(&inp.prevout);
+                    }
+                } else {
+                    // fallback to stored size
+                    self.total_bytes = self.total_bytes.saturating_sub(lowest_size);
+                }
+            } else {
+                return Err(SubmitError::PoolFull);
+            }
+        }
         for inp in &tx.transparent_inputs {
             self.spent.insert(inp.prevout, txid);
         }
-        self.txs.insert(txid, tx);
+        self.total_bytes = self.total_bytes.saturating_add(size);
+        self.txs.insert(
+            txid,
+            MemEntry {
+                tx,
+                size,
+                fee_rate: rate,
+            },
+        );
         Ok(txid)
     }
 
     #[allow(dead_code)]
     pub fn remove_mined(&mut self, mined: &[TxId]) {
         for id in mined {
-            if let Some(tx) = self.txs.remove(id) {
-                for inp in tx.transparent_inputs {
+            if let Some(entry) = self.txs.remove(id) {
+                self.total_bytes = self.total_bytes.saturating_sub(entry.size);
+                for inp in entry.tx.transparent_inputs {
                     self.spent.remove(&inp.prevout);
                 }
             }
@@ -145,8 +192,8 @@ impl Mempool {
     pub fn purge_conflicts_with_new_tip<C: ChainView>(&mut self, chain: &C) {
         // Simple approach: drop txs whose inputs are no longer available.
         let mut to_drop = Vec::new();
-        for (txid, tx) in self.txs.iter() {
-            for inp in &tx.transparent_inputs {
+        for (txid, entry) in self.txs.iter() {
+            for inp in &entry.tx.transparent_inputs {
                 if chain.lookup_outpoint(&inp.prevout).is_none() {
                     to_drop.push(*txid);
                     break;
@@ -159,16 +206,16 @@ impl Mempool {
     pub fn pending(&self) -> Vec<Transaction> {
         let mut v: Vec<_> = self.txs.values().cloned().collect();
         v.sort_by(|a, b| {
-            let fee_cmp = b.fee.atoms().cmp(&a.fee.atoms());
+            let fee_cmp = b.fee_rate.cmp(&a.fee_rate);
             if fee_cmp == std::cmp::Ordering::Equal {
-                let ha = txid(a).unwrap_or(Hash32::zero());
-                let hb = txid(b).unwrap_or(Hash32::zero());
+                let ha = txid(&a.tx).unwrap_or(Hash32::zero());
+                let hb = txid(&b.tx).unwrap_or(Hash32::zero());
                 ha.as_bytes().cmp(hb.as_bytes())
             } else {
                 fee_cmp
             }
         });
-        v
+        v.into_iter().map(|e| e.tx).collect()
     }
 
     pub fn has_tx(&self, id: &TxId) -> bool {
@@ -176,7 +223,21 @@ impl Mempool {
     }
 
     pub fn get_tx(&self, id: &TxId) -> Option<Transaction> {
-        self.txs.get(id).cloned()
+        self.txs.get(id).map(|e| e.tx.clone())
+    }
+
+    fn lowest_fee_rate(&self) -> Option<(TxId, u64, usize)> {
+        self.txs
+            .iter()
+            .map(|(id, e)| (*id, e.fee_rate, e.size))
+            .min_by(|a, b| {
+                let rate_cmp = a.1.cmp(&b.1);
+                if rate_cmp == std::cmp::Ordering::Equal {
+                    a.0.as_bytes().cmp(b.0.as_bytes())
+                } else {
+                    rate_cmp
+                }
+            })
     }
 }
 
