@@ -48,7 +48,10 @@ struct Config {
     /// HTTP(S) URL that returns a JSON array of seed addresses (["host:port", ...])
     #[arg(long = "seed-url")]
     seed_url: Option<String>,
-    /// Disable mining (follower/seed mode)
+    /// Enable mining (opt-in). Default: off.
+    #[arg(long = "mine")]
+    mine: bool,
+    /// Disable mining (follower/seed mode). Overrides --mine.
     #[arg(long = "no-mine")]
     no_mine: bool,
     /// Path to ChainDB (sled)
@@ -177,29 +180,68 @@ fn main() {
     // -----------------
     let mut height = 1u64;
     let mut mining_gate_active = true;
+    let min_peers_for_mining = 3usize;
+    let sync_stable_secs = 90u64;
+    let mut sync_stable_since: Option<std::time::Instant> = None;
+    let mut last_block_reason: Option<String> = None;
     loop {
         let best_height = { chain.lock().expect("chain lock").best_entry().height };
-        let peer_height = { p2p.lock().expect("p2p").best_peer_height() };
+        let (peer_height, peer_count) = {
+            let guard = p2p.lock().expect("p2p");
+            (guard.best_peer_height(), guard.peer_count())
+        };
         let syncing = best_height + 1 < peer_height;
         is_syncing.store(syncing, Ordering::Relaxed);
 
-        // Hold mining and mempool work until synced.
-        if syncing || !cfg.mining_enabled {
-            if cfg.mining_enabled && mining_gate_active {
-                println!(
-                    "Syncing... holding mining (local height {}, best peer {})",
-                    best_height, peer_height
-                );
+        // Track stability window.
+        if !syncing && best_height + 1 >= peer_height {
+            if sync_stable_since.is_none() {
+                sync_stable_since = Some(std::time::Instant::now());
             }
-            thread::sleep(Duration::from_millis(50));
-            continue;
+        } else {
+            sync_stable_since = None;
         }
-        if mining_gate_active && cfg.mining_enabled {
-            println!(
-                "Sync complete (local height {}, best peer {}); mining enabled",
+
+        // Mining readiness policy (non-consensus).
+        let mut block_reason: Option<String> = None;
+        if !cfg.mining_enabled {
+            block_reason = Some("mining disabled (no --mine)".into());
+        } else if peer_count < min_peers_for_mining {
+            block_reason = Some(format!(
+                "waiting for peers (have {}, need >= {})",
+                peer_count, min_peers_for_mining
+            ));
+        } else if best_height + 1 < peer_height.saturating_sub(1) {
+            block_reason = Some(format!(
+                "waiting for chain catch-up (local {}, best peer {})",
                 best_height, peer_height
+            ));
+        } else if let Some(since) = sync_stable_since {
+            if since.elapsed().as_secs() < sync_stable_secs {
+                block_reason = Some(format!(
+                    "waiting for sync stability ({}s/{}s)",
+                    since.elapsed().as_secs(),
+                    sync_stable_secs
+                ));
+            }
+        } else {
+            block_reason = Some("sync not stable yet".into());
+        }
+
+        if let Some(reason) = block_reason {
+            if last_block_reason.as_ref() != Some(&reason) {
+                println!("Mining paused: {reason}");
+                last_block_reason = Some(reason);
+            }
+            thread::sleep(Duration::from_millis(200));
+            continue;
+        } else if mining_gate_active {
+            println!(
+                "Mining enabled: height {}, peers {}, best peer {}",
+                best_height, peer_count, peer_height
             );
             mining_gate_active = false;
+            last_block_reason = None;
         }
 
         // Drain any locally submitted transactions (file dropbox).

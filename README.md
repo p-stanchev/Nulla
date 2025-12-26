@@ -18,7 +18,7 @@ Nulla is a privacy-first Proof-of-Work blockchain written in Rust. It targets pr
 - Policy layer: reorg depth cap, peer scoring/bans, basic rate limits (non-consensus).
 - Wallet: transparent CLI (keygen/address/encrypted storage/rescan/balance/list/send) via node RPC; Tauri GUI scaffold (start/stop node, balance/UTXO view, send/rescan, address management).
 - Mempool/Fees: transparent tx acceptance wired to ChainStore UTXO view; base fee enforced; miner includes mempool txs.
-- Sync + mining gating: mining/mempool work waits until the node catches the best peer height; `--no-mine`/`NULLA_NO_MINE` for follower/seed mode.
+- Sync + mining gating: mining is opt-in (`--mine` or `NULLA_MINE`; `--no-mine` overrides), waits until caught up to best peer height, requires peer_count ≥ 3 and ~90s stability; follower/seed mode stays off.
 - Networking bootstrap: seeds supported via `--seeds`/`NULLA_SEEDS` fallback when no explicit `--peers`.
 - RPC helpers: `get_balance`/`get_utxos` accept address or pubkey hash; submit/validate/chain info unchanged. RPC is newline-delimited JSON over TCP (not HTTP).
 - P2P tx relay: inv/get_tx/tx wired through the single mempool validation path.
