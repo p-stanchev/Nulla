@@ -850,6 +850,10 @@ impl P2pEngine {
                     return Ok(out);
                 }
                 let total = addrs.len();
+                if total == 0 {
+                    debug!("gossip: empty addr response from peer {}", peer_id);
+                    return Ok(out);
+                }
                 let mut accepted = 0usize;
                 let mut dropped = 0usize;
                 let now = std::time::SystemTime::now()
@@ -942,6 +946,9 @@ impl P2pEngine {
             });
             for stream in listener.incoming().flatten() {
                 let peer_addr = stream.peer_addr().ok();
+                if let Some(pa) = peer_addr {
+                    info!("p2p: incoming connection from {}", pa);
+                }
                 let _ = stream.set_nodelay(true);
                 let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
                 let (tx_out, rx_out) = mpsc::channel::<Message>();
@@ -1004,6 +1011,7 @@ impl P2pEngine {
         addr: SocketAddr,
         initial_getblocks: Vec<Hash32>,
     ) -> Result<thread::JoinHandle<()>, P2pError> {
+        info!("p2p: dialing {}", addr);
         let mut stream = TcpStream::connect(addr).map_err(|e| P2pError::Io(e.to_string()))?;
         stream
             .set_nodelay(true)
