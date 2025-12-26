@@ -7,6 +7,7 @@ use blake3::Hasher;
 use bs58::{decode as b58decode, encode as b58encode};
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
+use hex::FromHex;
 use k256::{
     ecdsa::{signature::Signer, SigningKey},
     EncodedPoint,
@@ -206,6 +207,43 @@ impl Wallet {
         new_meta.last_scanned_height = rpc.best_height().unwrap_or(start_height);
         self.write_meta(&new_meta)?;
         Ok(found)
+    }
+
+    pub fn export_key_hex(&self, address: &str, password: &str) -> Result<String> {
+        let bytes = self
+            .keys()
+            .get(address.as_bytes())?
+            .ok_or_else(|| anyhow!("address not found in wallet"))?;
+        let rec = KeyRecord::try_from_slice(&bytes)?;
+        let sk = decrypt_key(&rec.enc, password)?;
+        Ok(hex::encode(sk))
+    }
+
+    pub fn import_key_hex(&self, key_hex: &str, password: &str) -> Result<String> {
+        let priv_bytes = Vec::from_hex(key_hex).map_err(|_| anyhow!("invalid hex"))?;
+        if priv_bytes.len() != 32 {
+            return Err(anyhow!("expected 32-byte secret key"));
+        }
+        let sk = SigningKey::from_slice(&priv_bytes).map_err(|e| anyhow!(e.to_string()))?;
+        let pubkey = EncodedPoint::from(sk.verifying_key()).as_bytes().to_vec();
+        let addr = encode_address(&pubkey);
+        if self.keys().contains_key(addr.as_bytes())? {
+            return Err(anyhow!("key already present"));
+        }
+        let enc = encrypt_key(&priv_bytes, password)?;
+        let record = KeyRecord {
+            enc,
+            pubkey,
+            address: addr.clone(),
+        };
+        self.keys()
+            .insert(addr.as_bytes(), borsh::to_vec(&record)?)?;
+        let mut meta = self.read_meta()?;
+        if meta.default_key.is_none() {
+            meta.default_key = Some(addr.clone());
+            self.write_meta(&meta)?;
+        }
+        Ok(addr)
     }
 
     pub fn build_signed_tx(

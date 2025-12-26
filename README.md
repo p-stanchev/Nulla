@@ -72,6 +72,10 @@ Wallet (RPC-only; does **not** open the node DB)
 - Show address: `cargo run -p nulla-wallet -- addr`
 - Rescan UTXOs (node running):  
   `cargo run -p nulla-wallet -- rescan`
+- Export private key (hex):  
+  `cargo run -p nulla-wallet -- export-key --address <addr> [--password <pwd>]`
+- Import private key (hex, optional rescan):  
+  `cargo run -p nulla-wallet -- import-key --key-hex <hex> [--password <pwd>] [--rescan]`
 - Balance: `cargo run -p nulla-wallet -- balance`
 - Send (base fee added automatically):  
   `cargo run -p nulla-wallet -- send --to <addr> --amount <atoms>`

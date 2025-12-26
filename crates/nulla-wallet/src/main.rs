@@ -60,6 +60,21 @@ enum Commands {
         from_height: Option<u64>,
     },
     Serve,
+    ExportKey {
+        #[arg(long)]
+        address: String,
+        #[arg(long)]
+        password: Option<String>,
+    },
+    ImportKey {
+        #[arg(long)]
+        key_hex: String,
+        #[arg(long)]
+        password: Option<String>,
+        /// Optionally rescan after import (from height 0)
+        #[arg(long, default_value_t = false)]
+        rescan: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -122,6 +137,27 @@ fn main() -> Result<()> {
         Commands::Rescan { from_height } => {
             let found = wallet.rescan_via_rpc(&rpc, from_height)?;
             println!("Rescan complete. Stored {found} UTXOs.");
+        }
+        Commands::ExportKey { address, password } => {
+            let pwd = password.unwrap_or_else(|| prompt_password("Wallet password: ").unwrap());
+            let hex = wallet.export_key_hex(&address, &pwd)?;
+            println!("Private key (hex): {hex}");
+            println!("Store this key securely. Anyone with it can spend your funds.");
+        }
+        Commands::ImportKey {
+            key_hex,
+            password,
+            rescan,
+        } => {
+            let pwd = password.unwrap_or_else(|| prompt_password("Wallet password: ").unwrap());
+            let addr = wallet.import_key_hex(&key_hex, &pwd)?;
+            println!("Imported key for address: {addr}");
+            if rescan {
+                let found = wallet.rescan_via_rpc(&rpc, None)?;
+                println!("Rescan complete. Stored {found} UTXOs.");
+            } else {
+                println!("Run `rescan` to populate UTXOs for this key.");
+            }
         }
         Commands::Serve => {
             // already started above if listen provided; nothing to do
@@ -244,6 +280,34 @@ fn handle_wallet_request(
             let from_height = v.get("from_height").and_then(|h| h.as_u64());
             match wallet.rescan_via_rpc(node_rpc, from_height) {
                 Ok(found) => json!({"ok": true, "found": found}),
+                Err(e) => json!({"ok": false, "error": e.to_string()}),
+            }
+        }
+        "wallet_export_key" => {
+            let addr = match v.get("address").and_then(|a| a.as_str()) {
+                Some(a) => a,
+                None => return json!({"ok": false, "error": "missing address"}),
+            };
+            let pwd = match v.get("password").and_then(|p| p.as_str()) {
+                Some(p) => p,
+                None => return json!({"ok": false, "error": "missing password"}),
+            };
+            match wallet.export_key_hex(addr, pwd) {
+                Ok(hex) => json!({"ok": true, "key_hex": hex}),
+                Err(e) => json!({"ok": false, "error": e.to_string()}),
+            }
+        }
+        "wallet_import_key" => {
+            let key_hex = match v.get("key_hex").and_then(|k| k.as_str()) {
+                Some(k) => k,
+                None => return json!({"ok": false, "error": "missing key_hex"}),
+            };
+            let pwd = match v.get("password").and_then(|p| p.as_str()) {
+                Some(p) => p,
+                None => return json!({"ok": false, "error": "missing password"}),
+            };
+            match wallet.import_key_hex(key_hex, pwd) {
+                Ok(addr) => json!({"ok": true, "address": addr}),
                 Err(e) => json!({"ok": false, "error": e.to_string()}),
             }
         }
