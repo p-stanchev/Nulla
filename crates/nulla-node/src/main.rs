@@ -6,17 +6,20 @@ mod mempool;
 mod rpc;
 
 use clap::Parser;
+use reqwest::blocking;
 use std::env;
 use std::fs;
 use std::net::{SocketAddr, TcpListener};
 use std::path::PathBuf;
-use std::sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
 use std::thread;
 use std::time::Duration;
-use reqwest::blocking;
 
 use bs58::decode as b58decode;
-use nulla_node::chain_store::{ChainDb, ChainStore};
+use mempool::{Mempool, SubmitError as MempoolSubmitError};
 #[allow(unused_imports)]
 use nulla_consensus::validate_block_with_prev_bits;
 use nulla_core::{
@@ -24,9 +27,9 @@ use nulla_core::{
     TransactionKind, ADDRESS_PREFIX, CHAIN_ID, GENESIS_BITS, GENESIS_HASH_BYTES, GENESIS_NONCE,
     GENESIS_TIMESTAMP, NETWORK_MAGIC, PROTOCOL_VERSION,
 };
+use nulla_node::chain_store::{ChainDb, ChainStore};
 use nulla_p2p::net::{Message, P2pEngine, Policy};
 use nulla_state::{block_subsidy, LedgerState};
-use mempool::{Mempool, SubmitError as MempoolSubmitError};
 
 /// Extremely easy difficulty for devnet (currently unused; retained for debug).
 #[allow(dead_code)]
@@ -73,11 +76,9 @@ struct Config {
 
 fn main() {
     // Initialize logging so P2P/ops messages show up (env: RUST_LOG=info by default).
-    let _ = env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or("info"),
-    )
-    .format_timestamp_secs()
-    .try_init();
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .format_timestamp_secs()
+        .try_init();
 
     println!("Starting Nulla minimal miner");
     println!(
@@ -112,6 +113,13 @@ fn main() {
         },
     )
     .expect("p2p init");
+    // Prioritize user-supplied peers and seeds in the dialer table so we keep retrying them
+    // even if gossip is off or the addresses are non-public (e.g., LAN testing).
+    let mut dial_roots = cfg.peers.clone();
+    dial_roots.extend(cfg.seeds.clone());
+    if !dial_roots.is_empty() {
+        p2p.add_static_peers(dial_roots);
+    }
     if cfg.gossip_enabled {
         p2p.enable_gossip(true);
         println!("Gossip-lite enabled (non-critical)");
@@ -147,7 +155,11 @@ fn main() {
                 eng.next_dial_targets(2, Duration::from_secs(60))
             };
             for addr in targets {
-                let _ = P2pEngine::connect_and_sync(Arc::clone(&p2p_for_dial), addr, missing_getblocks.clone());
+                let _ = P2pEngine::connect_and_sync(
+                    Arc::clone(&p2p_for_dial),
+                    addr,
+                    missing_getblocks.clone(),
+                );
             }
         });
     }
@@ -155,7 +167,8 @@ fn main() {
     wait_for_missing(&chain_db, &best_chain, Duration::from_secs(2));
 
     // Build ChainStore once bodies are reconciled.
-    let chain = ChainStore::load_or_init_with_db((*chain_db).clone(), genesis.clone()).expect("valid genesis/db");
+    let chain = ChainStore::load_or_init_with_db((*chain_db).clone(), genesis.clone())
+        .expect("valid genesis/db");
     let chain = Arc::new(Mutex::new(chain));
     let rpc_listen = env::var("NULLA_RPC_LISTEN")
         .ok()
@@ -207,16 +220,15 @@ fn main() {
             Ok(())
         });
     }
-    let _ =
-        rpc::serve_rpc(
-            &rpc_listen,
-            rpc_auth,
-            Arc::clone(&chain),
-            Arc::clone(&mempool),
-            Arc::clone(&p2p),
-            Arc::clone(&mining_ready),
-            Arc::clone(&mining_block_reason),
-        );
+    let _ = rpc::serve_rpc(
+        &rpc_listen,
+        rpc_auth,
+        Arc::clone(&chain),
+        Arc::clone(&mempool),
+        Arc::clone(&p2p),
+        Arc::clone(&mining_ready),
+        Arc::clone(&mining_block_reason),
+    );
     println!("RPC listening on {rpc_listen}");
 
     // -----------------
@@ -311,9 +323,9 @@ fn main() {
             let pool = mempool.lock().expect("mempool");
             pool.pending()
         };
-        let fee_sum: Amount = txs_from_pool
-            .iter()
-            .fold(Amount::zero(), |acc, tx| acc.checked_add(tx.fee).unwrap_or(acc));
+        let fee_sum: Amount = txs_from_pool.iter().fold(Amount::zero(), |acc, tx| {
+            acc.checked_add(tx.fee).unwrap_or(acc)
+        });
         let subsidy = block_subsidy(height);
 
         let coinbase = coinbase_tx(height, fee_sum, subsidy, cfg.miner_pubkey_hash);
@@ -332,7 +344,9 @@ fn main() {
             let block = build_block(prev, prev_bits, mtp, &chain_lock, txs, next_bits);
             let block_for_store = block.clone();
 
-            chain_lock.insert_block(block).expect("block must validate and attach");
+            chain_lock
+                .insert_block(block)
+                .expect("block must validate and attach");
             let state = chain_lock.rebuild_state();
             let best = chain_lock.best_entry();
 
@@ -347,16 +361,14 @@ fn main() {
         // Advertise to peers using the single entrypoint.
         {
             let mut p2p_guard = p2p.lock().expect("p2p");
-            let _ = p2p_guard.handle_message(0, Message::Headers(vec![block_for_p2p.header.clone()]));
+            let _ =
+                p2p_guard.handle_message(0, Message::Headers(vec![block_for_p2p.header.clone()]));
             let _ = p2p_guard.handle_message(0, Message::Block(block_for_p2p));
         }
 
         println!(
             "Block {:>4} | hash={} | height={} | commitments={}",
-            best_height,
-            best_hash,
-            best_height,
-            state_commitments
+            best_height, best_hash, best_height, state_commitments
         );
 
         thread::sleep(Duration::from_secs(1));
@@ -407,10 +419,7 @@ fn build_genesis() -> Block {
 
     let hash = block_hash(&genesis);
     let expected = Hash32::from(GENESIS_HASH_BYTES);
-    assert_eq!(
-        hash, expected,
-        "genesis hash must match hardcoded constant"
-    );
+    assert_eq!(hash, expected, "genesis hash must match hardcoded constant");
 
     let mut state = LedgerState::new();
     apply_and_print(height0, &mut state, &genesis);
@@ -444,10 +453,7 @@ fn build_block(
     #[cfg(feature = "dev-pow")]
     {
         let _ = (_prev_bits, _median_time_past);
-        return Block {
-            header,
-            txs,
-        };
+        return Block { header, txs };
     }
 
     #[cfg(not(feature = "dev-pow"))]
@@ -497,9 +503,7 @@ fn coinbase_tx(height: u64, fees: Amount, subsidy: Amount, miner_pk_hash: [u8; 2
         kind: TransactionKind::Coinbase,
         transparent_inputs: vec![],
         transparent_outputs: vec![nulla_core::TransparentOutput {
-            value: subsidy
-                .checked_add(fees)
-                .unwrap_or(Amount::zero()),
+            value: subsidy.checked_add(fees).unwrap_or(Amount::zero()),
             pubkey_hash: miner_pk_hash,
         }],
         anchor_root: Hash32::zero(),
@@ -642,7 +646,10 @@ fn maybe_open_nat(listen: &SocketAddr) {
             return;
         }
     };
-    println!("nat: attempting port map for {} -> {}:{}", external_port, internal_ip, internal_port);
+    println!(
+        "nat: attempting port map for {} -> {}:{}",
+        external_port, internal_ip, internal_port
+    );
     // Try UPnP via igd.
     match igd::search_gateway(Default::default()) {
         Ok(gw) => {
@@ -702,10 +709,7 @@ fn resolve_config(cli: Config) -> ResolvedConfig {
         }
     }
     // Optional seed URL fetch (JSON array of strings).
-    if let Some(url) = cli
-        .seed_url
-        .or_else(|| env::var("NULLA_SEED_URL").ok())
-    {
+    if let Some(url) = cli.seed_url.or_else(|| env::var("NULLA_SEED_URL").ok()) {
         if let Ok(resp) = blocking::get(&url).and_then(|r| r.error_for_status()) {
             if let Ok(list) = resp.json::<Vec<String>>() {
                 for entry in list {
@@ -732,17 +736,23 @@ fn resolve_config(cli: Config) -> ResolvedConfig {
 
     let reorg_cap = cli
         .reorg_cap
-        .or_else(|| env::var("NULLA_REORG_CAP").ok().and_then(|v| v.parse().ok()))
+        .or_else(|| {
+            env::var("NULLA_REORG_CAP")
+                .ok()
+                .and_then(|v| v.parse().ok())
+        })
         .unwrap_or(100);
 
-    let (miner_pubkey_hash, miner_addr_b58) =
-        if let Some(addr) = cli.miner_address.or_else(|| env::var("NULLA_MINER_ADDRESS").ok()) {
-            let h = decode_address(&addr).expect("invalid miner address");
-            (h, addr)
-        } else {
-            eprintln!("warn: miner address not set; coinbase will burn rewards");
-            ([0u8; 20], format!("burn({:02x}...)", ADDRESS_PREFIX))
-        };
+    let (miner_pubkey_hash, miner_addr_b58) = if let Some(addr) = cli
+        .miner_address
+        .or_else(|| env::var("NULLA_MINER_ADDRESS").ok())
+    {
+        let h = decode_address(&addr).expect("invalid miner address");
+        (h, addr)
+    } else {
+        eprintln!("warn: miner address not set; coinbase will burn rewards");
+        ([0u8; 20], format!("burn({:02x}...)", ADDRESS_PREFIX))
+    };
 
     // mining opt-in: --mine or NULLA_MINE; disabled if --no-mine or NULLA_NO_MINE
     let mut mining_enabled = cli.mine || env::var("NULLA_MINE").is_ok();
@@ -805,10 +815,10 @@ fn wait_for_missing(db: &ChainDb, chain: &[Hash32], timeout: Duration) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
-    use tempfile;
     #[cfg(feature = "dev-pow")]
     use nulla_consensus::{bits_to_target, target_to_bits};
+    use serde_json::json;
+    use tempfile;
     #[cfg(feature = "dev-pow")]
     use tempfile::tempdir;
 
@@ -835,9 +845,7 @@ mod tests {
         let hash = block_hash(&genesis);
         println!(
             "genesis_hash={hash:?} nonce={} tx_merkle_root={:?} commitment_root={:?}",
-            genesis.header.nonce,
-            genesis.header.tx_merkle_root,
-            genesis.header.commitment_root
+            genesis.header.nonce, genesis.header.tx_merkle_root, genesis.header.commitment_root
         );
     }
 
@@ -875,8 +883,7 @@ mod tests {
 
         let mut _state = chain.rebuild_state();
         for height in 1u64..=12 {
-            let coinbase =
-                coinbase_tx(height, Amount::zero(), block_subsidy(height), [0u8; 20]);
+            let coinbase = coinbase_tx(height, Amount::zero(), block_subsidy(height), [0u8; 20]);
             let prev = chain.best_hash();
             let prev_bits = chain.best_bits();
             let mtp = chain.median_time_past(prev).unwrap_or(GENESIS_TIMESTAMP);
@@ -910,8 +917,7 @@ mod tests {
             let prev_entry = chain.entry(&prev).unwrap();
             let prev_bits = prev_entry.block.header.bits;
             let mtp = chain.median_time_past(prev).unwrap();
-            let coinbase =
-                coinbase_tx(height, Amount::zero(), block_subsidy(height), [0u8; 20]);
+            let coinbase = coinbase_tx(height, Amount::zero(), block_subsidy(height), [0u8; 20]);
             let mut block = build_block(prev, prev_bits, mtp, chain, vec![coinbase], bits);
             block.header.timestamp = prev_entry.block.header.timestamp + 1;
             block
