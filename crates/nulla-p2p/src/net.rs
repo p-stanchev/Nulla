@@ -882,7 +882,7 @@ impl P2pEngine {
                     self.insert_addr(addr, na.last_seen);
                     accepted += 1;
                 }
-                info!(
+                debug!(
                     "gossip: received addr from peer {} (total={}, accepted={}, dropped={}, table={})",
                     peer_id,
                     total,
@@ -931,7 +931,7 @@ impl P2pEngine {
         thread::spawn(move || {
             let eng_hb = Arc::clone(&engine);
             thread::spawn(move || loop {
-                thread::sleep(Duration::from_secs(10));
+                thread::sleep(Duration::from_secs(30));
                 let guard = eng_hb.lock().ok();
                 if let Some(eng) = guard {
                     let connected = eng.peer_count();
