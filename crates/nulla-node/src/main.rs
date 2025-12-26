@@ -687,17 +687,19 @@ fn resolve_config(cli: Config) -> ResolvedConfig {
         .filter_map(|s| s.trim().parse().ok())
         .collect::<Vec<_>>();
 
-    let seeds_raw = cli
-        .seeds
-        .or_else(|| env::var("NULLA_SEEDS").ok())
-        .unwrap_or_default();
+    // Track whether the user explicitly provided seeds (env or CLI). An empty string should
+    // disable the baked-in defaults, so we only fall back to hardcoded seeds if nothing was
+    // specified at all.
+    let seeds_env = env::var("NULLA_SEEDS");
+    let seeds_provided = cli.seeds.is_some() || seeds_env.is_ok();
+    let seeds_raw = cli.seeds.or_else(|| seeds_env.ok()).unwrap_or_default();
     let mut seeds = seeds_raw
         .split(',')
         .filter(|s| !s.trim().is_empty())
         .filter_map(|s| s.trim().parse().ok())
         .collect::<Vec<_>>();
     // If no seeds/peers are provided, fall back to default public seeds.
-    if seeds.is_empty() && peers.is_empty() {
+    if !seeds_provided && seeds.is_empty() && peers.is_empty() {
         for s in &[
             "45.155.53.102:27444",
             "45.155.53.112:27444",
