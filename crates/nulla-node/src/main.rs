@@ -137,6 +137,20 @@ fn main() {
     for peer in connect_list {
         let _ = P2pEngine::connect_and_sync(Arc::clone(&p2p), peer, missing.clone());
     }
+    {
+        let p2p_for_dial = Arc::clone(&p2p);
+        let missing_getblocks = missing.clone();
+        thread::spawn(move || loop {
+            thread::sleep(Duration::from_secs(30));
+            let targets = {
+                let mut eng = p2p_for_dial.lock().expect("p2p dial");
+                eng.next_dial_targets(2, Duration::from_secs(60))
+            };
+            for addr in targets {
+                let _ = P2pEngine::connect_and_sync(Arc::clone(&p2p_for_dial), addr, missing_getblocks.clone());
+            }
+        });
+    }
     // Poll for missing bodies to arrive.
     wait_for_missing(&chain_db, &best_chain, Duration::from_secs(2));
 

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::Path;
@@ -394,6 +394,7 @@ struct PeerState {
     window_start: Option<Instant>,
     sent_getaddr: bool,
     last_getaddr: Option<Instant>,
+    addr: Option<SocketAddr>,
 }
 
 
@@ -420,6 +421,7 @@ pub struct P2pEngine {
     policy: Policy,
     gossip_enabled: bool,
     addr_book: HashMap<SocketAddr, u64>, // last_seen
+    dial_history: HashMap<SocketAddr, Instant>,
     on_block: Option<Arc<dyn Fn(&Block) -> Result<(), String> + Send + Sync>>,
     on_tx: Option<Arc<dyn Fn(&Transaction) -> Result<(), String> + Send + Sync>>,
     has_tx: Option<Arc<dyn Fn(&Hash32) -> bool + Send + Sync>>,
@@ -436,6 +438,7 @@ impl P2pEngine {
             policy: Policy::default(),
             gossip_enabled: false,
             addr_book: HashMap::new(),
+            dial_history: HashMap::new(),
             on_block: None,
             on_tx: None,
             has_tx: None,
@@ -452,6 +455,7 @@ impl P2pEngine {
             policy,
             gossip_enabled: false,
             addr_book: HashMap::new(),
+            dial_history: HashMap::new(),
             on_block: None,
             on_tx: None,
             has_tx: None,
@@ -552,6 +556,39 @@ impl P2pEngine {
             }
         }
         self.addr_book.insert(addr, now);
+    }
+
+    fn connected_addrs(&self) -> HashSet<SocketAddr> {
+        self.peers
+            .values()
+            .filter(|p| !p.disconnected)
+            .filter_map(|p| p.addr)
+            .collect()
+    }
+
+    pub fn next_dial_targets(&mut self, max: usize, min_interval: Duration) -> Vec<SocketAddr> {
+        let now = Instant::now();
+        let connected = self.connected_addrs();
+        let mut out = Vec::new();
+        for addr in self.addr_book.keys() {
+            if !Self::valid_gossip_addr(addr) {
+                continue;
+            }
+            if connected.contains(addr) {
+                continue;
+            }
+            if let Some(ts) = self.dial_history.get(addr) {
+                if now.saturating_duration_since(*ts) < min_interval {
+                    continue;
+                }
+            }
+            self.dial_history.insert(*addr, now);
+            out.push(*addr);
+            if out.len() >= max {
+                break;
+            }
+        }
+        out
     }
 
     fn collect_addrs(&self, max: usize, now: u64) -> Vec<NetAddr> {
@@ -966,6 +1003,13 @@ impl P2pEngine {
                     }
                 }
                 guard.outbound.insert(peer_id, tx_out.clone());
+                if let Some(ps) = guard.peers.get_mut(&peer_id) {
+                    ps.addr = peer_addr;
+                } else {
+                    let mut ps = PeerState::default();
+                    ps.addr = peer_addr;
+                    guard.peers.insert(peer_id, ps);
+                }
                 drop(guard);
                 let eng = Arc::clone(&engine);
                 thread::spawn(move || {
@@ -1048,6 +1092,13 @@ impl P2pEngine {
         {
             let mut eng = engine.lock().expect("engine");
             eng.outbound.insert(peer_id, tx_out.clone());
+            if let Some(ps) = eng.peers.get_mut(&peer_id) {
+                ps.addr = Some(addr);
+            } else {
+                let mut ps = PeerState::default();
+                ps.addr = Some(addr);
+                eng.peers.insert(peer_id, ps);
+            }
         }
         let eng = Arc::clone(&engine);
         let handle = thread::spawn(move || {
