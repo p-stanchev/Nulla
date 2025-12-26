@@ -616,21 +616,19 @@ impl P2pEngine {
             if !seen.insert(addr) {
                 continue;
             }
-            if !Self::valid_gossip_addr(addr) {
-                if !self.static_peers.contains(&addr) {
-                    continue;
-                }
-            }
-            if connected.contains(addr) {
+            if !Self::valid_gossip_addr(&addr) && !self.static_peers.contains(&addr) {
                 continue;
             }
-            if let Some(ts) = self.dial_history.get(addr) {
+            if connected.contains(&addr) {
+                continue;
+            }
+            if let Some(ts) = self.dial_history.get(&addr) {
                 if now.saturating_duration_since(*ts) < min_interval {
                     continue;
                 }
             }
-            self.dial_history.insert(*addr, now);
-            out.push(*addr);
+            self.dial_history.insert(addr, now);
+            out.push(addr);
             if out.len() >= max {
                 break;
             }
