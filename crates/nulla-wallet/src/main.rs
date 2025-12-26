@@ -51,7 +51,10 @@ enum Commands {
         #[arg(long)]
         to: String,
         #[arg(long)]
-        amount: u64,
+        amount: String,
+        /// Interpret amount as atoms instead of NUL if set.
+        #[arg(long, default_value_t = false)]
+        atoms: bool,
         #[arg(long)]
         password: String,
     },
@@ -110,23 +113,41 @@ fn main() -> Result<()> {
         }
         Commands::Balance => {
             let total = wallet.balance()?;
-            println!("Balance: {} atoms", total);
+            println!(
+                "Balance: {} NUL ({} atoms)",
+                nulla_wallet::atoms_to_nul(total),
+                total
+            );
         }
         Commands::ListUtxos => {
             let utxos = wallet.list_utxos()?;
             for u in utxos {
                 println!(
-                    "{}:{} value={} height={}",
+                    "{}:{} value={} NUL ({} atoms) height={}",
                     hex::encode(u.txid.as_bytes()),
                     u.vout,
+                    nulla_wallet::atoms_to_nul(u.value),
                     u.value,
                     u.height
                 );
             }
         }
-        Commands::Send { to, amount, password } => {
+        Commands::Send {
+            to,
+            amount,
+            atoms,
+            password,
+        } => {
             let to_hash = decode_address(&to)?;
-            let tx = wallet.build_signed_tx(amount, to_hash, BASE_FEE_ATOMS, &password)?;
+            let atoms_amount = if atoms {
+                amount
+                    .parse::<u64>()
+                    .map_err(|_| anyhow::anyhow!("invalid atoms amount"))?
+            } else {
+                nulla_wallet::nul_to_atoms(&amount)?
+            };
+            let tx =
+                wallet.build_signed_tx(atoms_amount, to_hash, BASE_FEE_ATOMS, &password)?;
             let bytes = borsh::to_vec(&tx)?;
             let tx_hex = hex::encode(bytes);
             match rpc.submit_tx(&tx_hex)? {

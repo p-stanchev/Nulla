@@ -78,7 +78,8 @@ Wallet (RPC-only; does **not** open the node DB)
   `cargo run -p nulla-wallet -- import-key --key-hex <hex> [--password <pwd>] [--rescan]`
 - Balance: `cargo run -p nulla-wallet -- balance`
 - Send (base fee added automatically):  
-  `cargo run -p nulla-wallet -- send --to <addr> --amount <atoms>`
+  `cargo run -p nulla-wallet -- send --to <addr> --amount <NUL> [--atoms]`  
+  (default amount is NUL; use `--atoms` to pass raw atoms)
 - Common flags: `--wallet-db <path>` (default `nulla.wallet.db`), `--rpc <addr>` (default `127.0.0.1:27445`), `--rpc-auth-token <token>` if the node requires it.
 - Command syntax: keep a single `--` between cargo and wallet args; do **not** place an extra `--` before the subcommand (e.g., `cargo run -p nulla-wallet -- --wallet-db my.db rescan`).
 

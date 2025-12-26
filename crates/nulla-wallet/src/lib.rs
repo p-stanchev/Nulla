@@ -447,3 +447,41 @@ fn checksum4(data: &[u8]) -> [u8; 4] {
     h.finalize_xof().fill(&mut out);
     out
 }
+
+/// Convert atoms to a fixed 8-decimal NUL string (e.g., "1.23450000").
+pub fn atoms_to_nul(amount: u64) -> String {
+    let whole = amount / 100_000_000;
+    let frac = amount % 100_000_000;
+    format!("{whole}.{frac:08}")
+}
+
+/// Parse a NUL decimal string into atoms, enforcing max 8 decimals.
+pub fn nul_to_atoms(s: &str) -> Result<u64> {
+    let parts: Vec<&str> = s.trim().split('.').collect();
+    if parts.len() > 2 {
+        return Err(anyhow!("invalid amount format"));
+    }
+    let whole = parts[0]
+        .parse::<u64>()
+        .map_err(|_| anyhow!("invalid whole part"))?;
+    let frac = if parts.len() == 2 {
+        let f = parts[1];
+        if f.len() > 8 {
+            return Err(anyhow!("too many decimal places (max 8)"));
+        }
+        let mut padded = f.to_string();
+        while padded.len() < 8 {
+            padded.push('0');
+        }
+        padded
+            .parse::<u64>()
+            .map_err(|_| anyhow!("invalid fractional part"))?
+    } else {
+        0
+    };
+    let atoms = whole
+        .checked_mul(100_000_000)
+        .and_then(|w| w.checked_add(frac))
+        .ok_or_else(|| anyhow!("amount overflow"))?;
+    Ok(atoms)
+}
