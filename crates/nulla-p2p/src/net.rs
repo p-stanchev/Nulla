@@ -392,7 +392,9 @@ struct PeerState {
     msg_count: u32,
     window_start: Option<Instant>,
     sent_getaddr: bool,
+    last_getaddr: Option<Instant>,
 }
+
 
 #[derive(Clone, Copy)]
 pub struct Policy {
@@ -625,6 +627,22 @@ impl P2pEngine {
         peer_id: u64,
         msg: Message,
     ) -> Result<Vec<(u64, Message)>, P2pError> {
+        let mut proactive = Vec::new();
+        if self.gossip_enabled && self.peer_count() < TARGET_PEERS_FOR_GOSSIP {
+            if let Some(peer) = self.peers.get_mut(&peer_id) {
+                if peer.verack_seen {
+                    let now = Instant::now();
+                    let should_send = peer
+                        .last_getaddr
+                        .map_or(true, |t| now.saturating_duration_since(t) > Duration::from_secs(60));
+                    if should_send {
+                        peer.last_getaddr = Some(now);
+                        peer.sent_getaddr = true;
+                        proactive.push((peer_id, Message::GetAddr { max: 128 }));
+                    }
+                }
+            }
+        }
         {
             let peer = self.peers.entry(peer_id).or_default();
             // Simple rate limit: MAX_MSGS_PER_SEC per peer.
@@ -655,7 +673,7 @@ impl P2pEngine {
             return Err(P2pError::Disconnected);
         }
 
-        match msg {
+        let out_msgs: Result<Vec<(u64, Message)>, P2pError> = match msg {
             Message::Version(_) => {
                 let peer = self.peers.entry(peer_id).or_default();
                 peer.version_seen = true;
@@ -816,7 +834,7 @@ impl P2pEngine {
                 Ok(vec![(peer_id, Message::Addr(addrs))])
             }
             Message::Addr(addrs) => {
-                let mut out = Vec::new();
+                let out = Vec::new();
                 let peer = self.peers.entry(peer_id).or_default();
                 if !self.gossip_enabled || !peer.sent_getaddr {
                     return Ok(out);
@@ -847,7 +865,10 @@ impl P2pEngine {
                 }
                 Ok(out)
             }
-        }
+        };
+        let mut out = out_msgs?;
+        out.extend(proactive);
+        Ok(out)
     }
 
     fn write_message(stream: &mut TcpStream, msg: &Message) -> Result<(), P2pError> {
