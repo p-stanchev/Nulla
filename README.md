@@ -125,6 +125,21 @@ Notes:
 - Tx relay uses P2P inv/get_tx/tx; wallets still talk to the local node via RPC.
 - No zk, no pools, no explorers, no Stratum yet.
 
+## Tokenomics (v1)
+
+- Currency: Nulla (NUL), 8 decimals.
+- Consensus: Proof-of-Work (BLAKE3-based), 60s target block time.
+- Emission:
+  - Genesis supply: 0 NUL (no premine).
+  - Initial block reward: 8 NUL per block.
+  - Reduction: periodic step-down (halving schedule) to the tail rate.
+  - Tail emission: 0.1 NUL per block indefinitely after the main emission phase.
+  - Maximum supply: no hard cap (tail model); inflation decays toward the tail rate.
+  - Monetary policy fixed at genesis; not adjustable.
+- Distribution: no premine, no founder allocation, no dev tax; all coins mined via PoW.
+- Fees: non-zero minimum relay fee; fee-rate based mempool eviction; fees go to miners (coinbase).
+- Addresses/txs: Transparent P2PKH, address prefix 0x35, UTXO model.
+
 Two-node sanity (ops quickcheck)
 ```
 # Node A (miner)

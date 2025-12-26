@@ -54,6 +54,9 @@ struct Config {
     /// Disable mining (follower/seed mode). Overrides --mine.
     #[arg(long = "no-mine")]
     no_mine: bool,
+    /// Attempt NAT-PMP/UPnP port mapping for the listen port (opt-in).
+    #[arg(long = "nat")]
+    nat: bool,
     /// Path to ChainDB (sled)
     #[arg(long = "db")]
     db: Option<PathBuf>,
@@ -74,6 +77,9 @@ fn main() {
 
     let cfg = resolve_config(Config::parse());
     println!("Mining rewards sent to: {}", cfg.miner_addr_b58);
+    if cfg.nat_enabled {
+        maybe_open_nat(&cfg.listen);
+    }
 
     // -----------------
     // Genesis block (height 0) and DB setup
@@ -579,6 +585,37 @@ fn xor_hash(a: Hash32, b: Hash32) -> Hash32 {
     Hash32(out)
 }
 
+/// Attempt to open the P2P listen port via UPnP/NAT-PMP (best-effort, opt-in).
+fn maybe_open_nat(listen: &SocketAddr) {
+    let external_port = listen.port();
+    let internal_port = listen.port();
+    let internal_ip = match listen.ip() {
+        std::net::IpAddr::V4(v4) => v4,
+        std::net::IpAddr::V6(_) => {
+            eprintln!("nat: IPv6 listen addr not supported for UPnP/NAT-PMP");
+            return;
+        }
+    };
+    println!("nat: attempting port map for {} -> {}:{}", external_port, internal_ip, internal_port);
+    // Try UPnP via igd.
+    match igd::search_gateway(Default::default()) {
+        Ok(gw) => {
+            let internal = std::net::SocketAddrV4::new(internal_ip, internal_port);
+            match gw.add_port(
+                igd::PortMappingProtocol::TCP,
+                external_port,
+                internal,
+                3600,
+                "nulla-node",
+            ) {
+                Ok(_) => println!("nat: UPnP port map established on {}", external_port),
+                Err(e) => eprintln!("nat: UPnP port map failed: {e}"),
+            }
+        }
+        Err(e) => eprintln!("nat: gateway search failed: {e}"),
+    }
+}
+
 fn resolve_config(cli: Config) -> ResolvedConfig {
     let listen = cli
         .listen
@@ -661,6 +698,12 @@ fn resolve_config(cli: Config) -> ResolvedConfig {
             ([0u8; 20], format!("burn({:02x}...)", ADDRESS_PREFIX))
         };
 
+    // mining opt-in: --mine or NULLA_MINE; disabled if --no-mine or NULLA_NO_MINE
+    let mut mining_enabled = cli.mine || env::var("NULLA_MINE").is_ok();
+    if cli.no_mine || env::var("NULLA_NO_MINE").is_ok() {
+        mining_enabled = false;
+    }
+
     ResolvedConfig {
         listen,
         peers,
@@ -670,7 +713,8 @@ fn resolve_config(cli: Config) -> ResolvedConfig {
         reorg_cap,
         miner_pubkey_hash,
         miner_addr_b58,
-        mining_enabled: !cli.no_mine && env::var("NULLA_NO_MINE").is_err(),
+        mining_enabled,
+        nat_enabled: cli.nat || env::var("NULLA_NAT").is_ok(),
     }
 }
 
@@ -684,6 +728,7 @@ struct ResolvedConfig {
     miner_pubkey_hash: [u8; 20],
     miner_addr_b58: String,
     mining_enabled: bool,
+    nat_enabled: bool,
 }
 
 fn compute_best_chain_and_missing(db: &ChainDb) -> (Hash32, Vec<Hash32>, Vec<Hash32>) {
