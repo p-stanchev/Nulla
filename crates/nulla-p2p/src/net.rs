@@ -2,17 +2,19 @@ use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::Path;
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
-use borsh::{to_vec, BorshDeserialize, BorshSerialize};
+use borsh::{BorshDeserialize, BorshSerialize, to_vec};
 use log::{debug, info};
 use nulla_consensus::{
     median_time_past, tip_is_better, validate_block_with_prev_bits, validate_header_with_prev_bits,
     work_from_bits,
 };
-use nulla_core::{block_header_hash, txid, Block, BlockHeader, Hash32, Transaction, GENESIS_HASH_BYTES};
+use nulla_core::{
+    Block, BlockHeader, GENESIS_HASH_BYTES, Hash32, Transaction, block_header_hash, txid,
+};
 use num_bigint::BigUint;
 use thiserror::Error;
 
@@ -93,13 +95,15 @@ impl HeaderStore {
             best: Hash32::from(GENESIS_HASH_BYTES),
         };
 
-        let hash = block_header_hash(&genesis).map_err(|e| P2pError::InvalidHeader(format!("{e:?}")))?;
+        let hash =
+            block_header_hash(&genesis).map_err(|e| P2pError::InvalidHeader(format!("{e:?}")))?;
         if hash != Hash32::from(GENESIS_HASH_BYTES) {
             return Err(P2pError::InvalidHeader("genesis hash mismatch".into()));
         }
 
         if store.headers.is_empty() {
-            let work = work_from_bits(genesis.bits).map_err(|e| P2pError::InvalidHeader(format!("{e:?}")))?;
+            let work = work_from_bits(genesis.bits)
+                .map_err(|e| P2pError::InvalidHeader(format!("{e:?}")))?;
             let rec = HeaderRecord {
                 header: genesis.clone(),
                 height: 0,
@@ -178,8 +182,12 @@ impl HeaderStore {
     }
 
     pub fn accept_block(&mut self, block: Block) -> Result<(), P2pError> {
-        let hash = block_header_hash(&block.header).map_err(|e| P2pError::InvalidHeader(format!("{e:?}")))?;
-        let hdr_entry = self.entries.get(&hash).ok_or(P2pError::InvalidHeader("unknown header".into()))?;
+        let hash = block_header_hash(&block.header)
+            .map_err(|e| P2pError::InvalidHeader(format!("{e:?}")))?;
+        let hdr_entry = self
+            .entries
+            .get(&hash)
+            .ok_or(P2pError::InvalidHeader("unknown header".into()))?;
 
         // Header consistency.
         if block.header != hdr_entry.header {
@@ -188,13 +196,18 @@ impl HeaderStore {
 
         let prev = block.header.prev;
         let prev_entry = self.entries.get(&prev).ok_or(P2pError::UnknownPrev)?;
-        let mtp = self.median_time_past(prev).ok_or(P2pError::InvalidHeader("missing mtp".into()))?;
+        let mtp = self
+            .median_time_past(prev)
+            .ok_or(P2pError::InvalidHeader("missing mtp".into()))?;
 
         validate_block_with_prev_bits(prev_entry.header.bits, Some(mtp), &block)
             .map_err(|e| P2pError::InvalidHeader(format!("{e:?}")))?;
 
         self.blocks
-            .insert(hash.as_bytes(), to_vec(&block).map_err(|e| P2pError::Io(e.to_string()))?)
+            .insert(
+                hash.as_bytes(),
+                to_vec(&block).map_err(|e| P2pError::Io(e.to_string()))?,
+            )
             .map_err(|e| P2pError::Io(e.to_string()))?;
         self.have_block.insert(hash, true);
         Ok(())
@@ -234,19 +247,20 @@ impl HeaderStore {
 
     pub fn accept_header(&mut self, header: BlockHeader) -> Result<(), P2pError> {
         let prev = header.prev;
-        let prev_entry = self
-            .entries
-            .get(&prev)
-            .ok_or(P2pError::UnknownPrev)?;
-        let mtp = self.median_time_past(prev).ok_or(P2pError::InvalidHeader("missing mtp".into()))?;
+        let prev_entry = self.entries.get(&prev).ok_or(P2pError::UnknownPrev)?;
+        let mtp = self
+            .median_time_past(prev)
+            .ok_or(P2pError::InvalidHeader("missing mtp".into()))?;
 
         validate_header_with_prev_bits(prev_entry.header.bits, Some(mtp), &header)
             .map_err(|e| P2pError::InvalidHeader(format!("{e:?}")))?;
 
-        let work = work_from_bits(header.bits).map_err(|e| P2pError::InvalidHeader(format!("{e:?}")))?;
+        let work =
+            work_from_bits(header.bits).map_err(|e| P2pError::InvalidHeader(format!("{e:?}")))?;
         let cum = &prev_entry.cumulative_work + work;
         let height = prev_entry.height + 1;
-        let hash = block_header_hash(&header).map_err(|e| P2pError::InvalidHeader(format!("{e:?}")))?;
+        let hash =
+            block_header_hash(&header).map_err(|e| P2pError::InvalidHeader(format!("{e:?}")))?;
 
         let rec = HeaderRecord {
             header: header.clone(),
@@ -255,8 +269,7 @@ impl HeaderStore {
         };
 
         let best_before = self.best_entry();
-        let should_update =
-            tip_is_better(&cum, &hash, &best_before.cumulative_work, &self.best);
+        let should_update = tip_is_better(&cum, &hash, &best_before.cumulative_work, &self.best);
 
         self.upsert(hash, &rec, should_update.then_some(hash))
             .map_err(|e| P2pError::Io(e.to_string()))?;
@@ -357,7 +370,7 @@ pub struct Version {
 
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub struct NetAddr {
-    pub ip: [u8; 16],   // IPv4-mapped allowed
+    pub ip: [u8; 16], // IPv4-mapped allowed
     pub port: u16,
     pub last_seen: u64, // unix seconds
     pub services: u32,
@@ -379,7 +392,9 @@ pub enum Message {
     InvTx(Vec<Hash32>),
     GetTx(Hash32),
     Tx(Transaction),
-    GetAddr { max: u16 },
+    GetAddr {
+        max: u16,
+    },
     Addr(Vec<NetAddr>),
 }
 
@@ -396,7 +411,6 @@ struct PeerState {
     last_getaddr: Option<Instant>,
     addr: Option<SocketAddr>,
 }
-
 
 #[derive(Clone, Copy)]
 pub struct Policy {
@@ -422,6 +436,7 @@ pub struct P2pEngine {
     gossip_enabled: bool,
     addr_book: HashMap<SocketAddr, u64>, // last_seen
     dial_history: HashMap<SocketAddr, Instant>,
+    static_peers: HashSet<SocketAddr>,
     on_block: Option<Arc<dyn Fn(&Block) -> Result<(), String> + Send + Sync>>,
     on_tx: Option<Arc<dyn Fn(&Transaction) -> Result<(), String> + Send + Sync>>,
     has_tx: Option<Arc<dyn Fn(&Hash32) -> bool + Send + Sync>>,
@@ -439,6 +454,7 @@ impl P2pEngine {
             gossip_enabled: false,
             addr_book: HashMap::new(),
             dial_history: HashMap::new(),
+            static_peers: HashSet::new(),
             on_block: None,
             on_tx: None,
             has_tx: None,
@@ -446,7 +462,11 @@ impl P2pEngine {
         })
     }
 
-    pub fn with_policy(path: &Path, genesis: BlockHeader, policy: Policy) -> Result<Self, P2pError> {
+    pub fn with_policy(
+        path: &Path,
+        genesis: BlockHeader,
+        policy: Policy,
+    ) -> Result<Self, P2pError> {
         Ok(Self {
             store: HeaderStore::open(path, genesis)?,
             peers: HashMap::new(),
@@ -456,6 +476,7 @@ impl P2pEngine {
             gossip_enabled: false,
             addr_book: HashMap::new(),
             dial_history: HashMap::new(),
+            static_peers: HashSet::new(),
             on_block: None,
             on_tx: None,
             has_tx: None,
@@ -529,6 +550,24 @@ impl P2pEngine {
         self.lookup_tx = Some(Arc::new(f));
     }
 
+    /// Seed the dialer with known-good addresses (e.g., CLI peers/seeds).
+    /// These are retried even if gossip is disabled or the address is private.
+    pub fn add_static_peers<I>(&mut self, addrs: I)
+    where
+        I: IntoIterator<Item = SocketAddr>,
+    {
+        let now = SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        for addr in addrs {
+            self.static_peers.insert(addr);
+            if Self::valid_gossip_addr(&addr) {
+                self.insert_addr(addr, now);
+            }
+        }
+    }
+
     pub fn send_to(&self, peer_id: u64, msg: Message) -> Result<(), P2pError> {
         if let Some(tx) = self.outbound.get(&peer_id) {
             tx.send(msg).map_err(|e| P2pError::Io(e.to_string()))
@@ -570,9 +609,17 @@ impl P2pEngine {
         let now = Instant::now();
         let connected = self.connected_addrs();
         let mut out = Vec::new();
-        for addr in self.addr_book.keys() {
-            if !Self::valid_gossip_addr(addr) {
+        let mut seen = HashSet::new();
+        let mut candidates: Vec<SocketAddr> = self.static_peers.iter().copied().collect();
+        candidates.extend(self.addr_book.keys().copied());
+        for addr in candidates {
+            if !seen.insert(addr) {
                 continue;
+            }
+            if !Self::valid_gossip_addr(addr) {
+                if !self.static_peers.contains(&addr) {
+                    continue;
+                }
             }
             if connected.contains(addr) {
                 continue;
@@ -637,7 +684,11 @@ impl P2pEngine {
             }
             SocketAddr::V6(v6) => {
                 let ip = v6.ip();
-                if ip.is_loopback() || ip.is_unique_local() || ip.is_unspecified() || ip.is_multicast() {
+                if ip.is_loopback()
+                    || ip.is_unique_local()
+                    || ip.is_unspecified()
+                    || ip.is_multicast()
+                {
                     return false;
                 }
                 v6.port() != 0
@@ -670,9 +721,9 @@ impl P2pEngine {
             if let Some(peer) = self.peers.get_mut(&peer_id) {
                 if peer.verack_seen {
                     let now = Instant::now();
-                    let should_send = peer
-                        .last_getaddr
-                        .map_or(true, |t| now.saturating_duration_since(t) > Duration::from_secs(60));
+                    let should_send = peer.last_getaddr.map_or(true, |t| {
+                        now.saturating_duration_since(t) > Duration::from_secs(60)
+                    });
                     if should_send {
                         peer.last_getaddr = Some(now);
                         peer.sent_getaddr = true;
@@ -720,12 +771,28 @@ impl P2pEngine {
         let out_msgs: Result<Vec<(u64, Message)>, P2pError> = match msg {
             Message::Version(_) => {
                 let peer = self.peers.entry(peer_id).or_default();
+                let first_version = !peer.version_seen;
                 peer.version_seen = true;
                 if let Message::Version(v) = &msg {
                     peer.height = v.height;
                 }
                 let mut out = vec![(peer_id, Message::Verack)];
-                out.push((peer_id, Message::Version(Version { height: self.store.best_entry().height })));
+                out.push((
+                    peer_id,
+                    Message::Version(Version {
+                        height: self.store.best_entry().height,
+                    }),
+                ));
+                if first_version {
+                    let locator = self.store.locator();
+                    out.push((
+                        peer_id,
+                        Message::GetHeaders {
+                            locator,
+                            stop: None,
+                        },
+                    ));
+                }
                 Ok(out)
             }
             Message::Verack => {
@@ -819,11 +886,7 @@ impl P2pEngine {
                 }
                 let mut unknown = Vec::new();
                 for h in txids {
-                    let known = self
-                        .has_tx
-                        .as_ref()
-                        .map(|f| f(&h))
-                        .unwrap_or(false);
+                    let known = self.has_tx.as_ref().map(|f| f(&h)).unwrap_or(false);
                     if !known {
                         unknown.push(h);
                     }
@@ -964,21 +1027,26 @@ impl P2pEngine {
         Ok(Some(msg))
     }
 
-    pub fn serve_incoming(engine: Arc<Mutex<P2pEngine>>, listener: TcpListener) -> thread::JoinHandle<()> {
+    pub fn serve_incoming(
+        engine: Arc<Mutex<P2pEngine>>,
+        listener: TcpListener,
+    ) -> thread::JoinHandle<()> {
         thread::spawn(move || {
             let eng_hb = Arc::clone(&engine);
-            thread::spawn(move || loop {
-                thread::sleep(Duration::from_secs(30));
-                let guard = eng_hb.lock().ok();
-                if let Some(eng) = guard {
-                    let connected = eng.peer_count();
-                    let outbound = eng.outbound.len();
-                    let inbound = connected.saturating_sub(outbound);
-                    let addr_table = eng.addr_book.len();
-                    info!(
-                        "net: peers connected={} outbound={} inbound={} addr_table={}",
-                        connected, outbound, inbound, addr_table
-                    );
+            thread::spawn(move || {
+                loop {
+                    thread::sleep(Duration::from_secs(30));
+                    let guard = eng_hb.lock().ok();
+                    if let Some(eng) = guard {
+                        let connected = eng.peer_count();
+                        let outbound = eng.outbound.len();
+                        let inbound = connected.saturating_sub(outbound);
+                        let addr_table = eng.addr_book.len();
+                        info!(
+                            "net: peers connected={} outbound={} inbound={} addr_table={}",
+                            connected, outbound, inbound, addr_table
+                        );
+                    }
                 }
             });
             for stream in listener.incoming().flatten() {
@@ -1072,7 +1140,11 @@ impl P2pEngine {
                     .as_secs();
                 eng.insert_addr(addr, now);
             }
-            (eng.next_peer_id(), eng.store.locator(), eng.best_entry().height)
+            (
+                eng.next_peer_id(),
+                eng.store.locator(),
+                eng.best_entry().height,
+            )
         };
 
         P2pEngine::write_message(&mut stream, &Message::Version(Version { height }))?;
@@ -1141,21 +1213,23 @@ impl P2pEngine {
 #[cfg(all(test, feature = "dev-pow"))]
 mod tests {
     use super::*;
+    use nulla_core::{
+        Amount, Commitment, OutPoint, PROTOCOL_VERSION, Transaction, TransactionKind,
+        TransparentInput, TransparentOutput,
+    };
     use std::net::TcpListener;
-    use std::sync::{mpsc, Arc, Mutex};
+    use std::sync::{Arc, Mutex, mpsc};
     use std::time::Duration;
     use tempfile::tempdir;
-    use nulla_core::{
-        Amount, Commitment, OutPoint, Transaction, TransactionKind, TransparentInput, TransparentOutput,
-        PROTOCOL_VERSION,
-    };
 
     fn genesis_header() -> BlockHeader {
         let prev = Hash32::zero();
-        let tx_merkle_root =
-            Hash32(hex_literal::hex!("4d89bf74b9c3633fc497f182020f31304c94b1096413687c891a57e7bb92cca3"));
-        let commitment_root =
-            Hash32(hex_literal::hex!("300eb2dc8d3001271ea0f2fcada9387e7f5817533d863e5a45e5bd8e5f2ca09e"));
+        let tx_merkle_root = Hash32(hex_literal::hex!(
+            "4d89bf74b9c3633fc497f182020f31304c94b1096413687c891a57e7bb92cca3"
+        ));
+        let commitment_root = Hash32(hex_literal::hex!(
+            "300eb2dc8d3001271ea0f2fcada9387e7f5817533d863e5a45e5bd8e5f2ca09e"
+        ));
         BlockHeader {
             version: PROTOCOL_VERSION,
             prev,
@@ -1210,9 +1284,11 @@ mod tests {
         let child_easy = make_child(&genesis, 0x207f_ffff, genesis.timestamp + 1);
         let child_hard = make_child(&genesis, 0x1e00_ffff, genesis.timestamp + 2);
 
-        p2p.handle_message(1, Message::Headers(vec![child_easy.clone()])).unwrap();
+        p2p.handle_message(1, Message::Headers(vec![child_easy.clone()]))
+            .unwrap();
         let best_after_easy = p2p.best_hash();
-        p2p.handle_message(2, Message::Headers(vec![child_hard.clone()])).unwrap();
+        p2p.handle_message(2, Message::Headers(vec![child_hard.clone()]))
+            .unwrap();
         let best_after_hard = p2p.best_hash();
         assert_ne!(best_after_easy, best_after_hard);
         assert_eq!(best_after_hard, block_header_hash(&child_hard).unwrap());
@@ -1241,7 +1317,8 @@ mod tests {
         {
             let mut p2p = P2pEngine::new(&path, genesis.clone()).unwrap();
             let h1 = make_child(&genesis, genesis.bits, genesis.timestamp + 1);
-            p2p.handle_message(1, Message::Headers(vec![h1.clone()])).unwrap();
+            p2p.handle_message(1, Message::Headers(vec![h1.clone()]))
+                .unwrap();
             assert_eq!(p2p.best_entry().height, 1);
         }
         let p2p = P2pEngine::new(&path, genesis.clone()).unwrap();
@@ -1253,15 +1330,20 @@ mod tests {
         let dir_a = tempdir().unwrap();
         let dir_b = tempdir().unwrap();
         let genesis = genesis_header();
-        let eng_a = Arc::new(Mutex::new(P2pEngine::new(&dir_a.path().join("db"), genesis.clone()).unwrap()));
-        let eng_b = Arc::new(Mutex::new(P2pEngine::new(&dir_b.path().join("db"), genesis.clone()).unwrap()));
+        let eng_a = Arc::new(Mutex::new(
+            P2pEngine::new(&dir_a.path().join("db"), genesis.clone()).unwrap(),
+        ));
+        let eng_b = Arc::new(Mutex::new(
+            P2pEngine::new(&dir_b.path().join("db"), genesis.clone()).unwrap(),
+        ));
 
         // Prepare a block on node A.
         let child = make_child(&genesis, genesis.bits, genesis.timestamp + 1);
         let block = dummy_block(child.clone());
         {
             let mut a = eng_a.lock().unwrap();
-            a.handle_message(0, Message::Headers(vec![child.clone()])).unwrap();
+            a.handle_message(0, Message::Headers(vec![child.clone()]))
+                .unwrap();
             a.handle_message(0, Message::Block(block)).unwrap();
         }
 
@@ -1333,7 +1415,8 @@ mod tests {
 
         let h1 = make_child(&genesis, genesis.bits, genesis.timestamp + 1);
         let h2 = make_child(&h1, genesis.bits, h1.timestamp + 1);
-        p2p.handle_message(1, Message::Headers(vec![h1.clone(), h2.clone()])).unwrap();
+        p2p.handle_message(1, Message::Headers(vec![h1.clone(), h2.clone()]))
+            .unwrap();
 
         // Competing fork from genesis should exceed policy depth.
         let fork = make_child(&genesis, genesis.bits, genesis.timestamp + 2);
