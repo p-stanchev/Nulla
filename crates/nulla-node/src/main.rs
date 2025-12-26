@@ -729,6 +729,17 @@ fn resolve_config(cli: Config) -> ResolvedConfig {
         }
     }
 
+    // Drop any self-references to avoid self-dial/loopback attempts.
+    let listen_addr = listen;
+    let peers = peers
+        .into_iter()
+        .filter(|p| p != &listen_addr)
+        .collect::<Vec<_>>();
+    let seeds = seeds
+        .into_iter()
+        .filter(|s| s != &listen_addr)
+        .collect::<Vec<_>>();
+
     let db_path = cli
         .db
         .or_else(|| env::var("NULLA_DB").ok().map(PathBuf::from))
