@@ -72,6 +72,13 @@ struct Config {
 }
 
 fn main() {
+    // Initialize logging so P2P/ops messages show up (env: RUST_LOG=info by default).
+    let _ = env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or("info"),
+    )
+    .format_timestamp_secs()
+    .try_init();
+
     println!("Starting Nulla minimal miner");
     println!(
         "Chain ID: {CHAIN_ID} | magic: {:?} | addr_prefix: 0x{:x}",
