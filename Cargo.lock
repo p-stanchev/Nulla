@@ -1152,6 +1152,7 @@ version = "0.1.0"
 dependencies = [
  "borsh",
  "hex-literal",
+ "log",
  "nulla-consensus",
  "nulla-core",
  "num-bigint",

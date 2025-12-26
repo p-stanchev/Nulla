@@ -12,6 +12,7 @@ thiserror = "1.0"
 tempfile = "3.10"
 num-bigint = "0.4"
 hex-literal = "0.4"
+log = "0.4"
 
 [features]
 default = []

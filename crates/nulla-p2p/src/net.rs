@@ -7,6 +7,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use borsh::{to_vec, BorshDeserialize, BorshSerialize};
+use log::{debug, info};
 use nulla_consensus::{
     median_time_past, tip_is_better, validate_block_with_prev_bits, validate_header_with_prev_bits,
     work_from_bits,
@@ -639,6 +640,12 @@ impl P2pEngine {
                         peer.last_getaddr = Some(now);
                         peer.sent_getaddr = true;
                         proactive.push((peer_id, Message::GetAddr { max: 128 }));
+                        debug!(
+                            "gossip: sending getaddr to peer {} (peers={} target={})",
+                            peer_id,
+                            self.peer_count(),
+                            TARGET_PEERS_FOR_GOSSIP
+                        );
                     }
                 }
             }
@@ -842,6 +849,9 @@ impl P2pEngine {
                 if addrs.len() > MAX_ADDR_RESP {
                     return Ok(out);
                 }
+                let total = addrs.len();
+                let mut accepted = 0usize;
+                let mut dropped = 0usize;
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
@@ -856,13 +866,26 @@ impl P2pEngine {
                         ip => SocketAddr::from((std::net::Ipv6Addr::from(ip), na.port)),
                     };
                     if !Self::valid_gossip_addr(&addr) {
+                        dropped += 1;
+                        debug!("gossip: drop addr {:?} (invalid/private/port0)", addr);
                         continue;
                     }
                     if now.saturating_sub(na.last_seen) > ADDR_EXPIRY_SECS {
+                        dropped += 1;
+                        debug!("gossip: drop addr {:?} (expired)", addr);
                         continue;
                     }
                     self.insert_addr(addr, na.last_seen);
+                    accepted += 1;
                 }
+                info!(
+                    "gossip: received addr from peer {} (total={}, accepted={}, dropped={}, table={})",
+                    peer_id,
+                    total,
+                    accepted,
+                    dropped,
+                    self.addr_book.len()
+                );
                 Ok(out)
             }
         };
@@ -902,6 +925,21 @@ impl P2pEngine {
 
     pub fn serve_incoming(engine: Arc<Mutex<P2pEngine>>, listener: TcpListener) -> thread::JoinHandle<()> {
         thread::spawn(move || {
+            let eng_hb = Arc::clone(&engine);
+            thread::spawn(move || loop {
+                thread::sleep(Duration::from_secs(10));
+                let guard = eng_hb.lock().ok();
+                if let Some(eng) = guard {
+                    let connected = eng.peer_count();
+                    let outbound = eng.outbound.len();
+                    let inbound = connected.saturating_sub(outbound);
+                    let addr_table = eng.addr_book.len();
+                    info!(
+                        "net: peers connected={} outbound={} inbound={} addr_table={}",
+                        connected, outbound, inbound, addr_table
+                    );
+                }
+            });
             for stream in listener.incoming().flatten() {
                 let peer_addr = stream.peer_addr().ok();
                 let _ = stream.set_nodelay(true);
