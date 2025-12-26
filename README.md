@@ -21,7 +21,7 @@ Nulla is a privacy-first Proof-of-Work blockchain written in Rust. It targets pr
 - Sync + mining gating: mining/mempool work waits until the node catches the best peer height; `--no-mine`/`NULLA_NO_MINE` for follower/seed mode.
 - Networking bootstrap: seeds supported via `--seeds`/`NULLA_SEEDS` fallback when no explicit `--peers`.
 - RPC helpers: `get_balance`/`get_utxos` accept address or pubkey hash; submit/validate/chain info unchanged.
-- P2P tx relay: inv/get_tx/tx wired through the single mempool validation path.
+- P2P tx relay: inv/get_tx/tx wired through the single mempool validation path.\n- Optional seed URL: --seed-url/NULLA_SEED_URL fetches a JSON list of peers from a VPS/bootstrap endpoint.\n- Fork mitigation: initial-sync gate + follower mode reduce accidental forks; consensus still resolves forks via heaviest work (forks cannot be eliminated entirely in PoW).
 
 ---
 
@@ -139,4 +139,6 @@ cargo test --workspace --features dev-pow
 ## Disclaimer
 
 This code is experimental and unaudited. Do not use it for real funds.
+
+
 

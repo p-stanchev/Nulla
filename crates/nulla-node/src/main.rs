@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use std::sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex};
 use std::thread;
 use std::time::Duration;
+use reqwest::blocking;
 
 use bs58::decode as b58decode;
 use nulla_node::chain_store::{ChainDb, ChainStore};
@@ -43,6 +44,9 @@ struct Config {
     /// Seed peers (fallback if no explicit peers), comma separated host:port list
     #[arg(long = "seeds")]
     seeds: Option<String>,
+    /// HTTP(S) URL that returns a JSON array of seed addresses (["host:port", ...])
+    #[arg(long = "seed-url")]
+    seed_url: Option<String>,
     /// Disable mining (follower/seed mode)
     #[arg(long = "no-mine")]
     no_mine: bool,
@@ -540,11 +544,32 @@ fn resolve_config(cli: Config) -> ResolvedConfig {
         .seeds
         .or_else(|| env::var("NULLA_SEEDS").ok())
         .unwrap_or_default();
-    let seeds = seeds_raw
+    let mut seeds = seeds_raw
         .split(',')
         .filter(|s| !s.trim().is_empty())
         .filter_map(|s| s.trim().parse().ok())
         .collect::<Vec<_>>();
+    // Optional seed URL fetch (JSON array of strings).
+    if let Some(url) = cli
+        .seed_url
+        .or_else(|| env::var("NULLA_SEED_URL").ok())
+    {
+        if let Ok(resp) = blocking::get(&url).and_then(|r| r.error_for_status()) {
+            if let Ok(list) = resp.json::<Vec<String>>() {
+                for entry in list {
+                    if let Ok(addr) = entry.parse() {
+                        seeds.push(addr);
+                    } else {
+                        eprintln!("warn: skipping invalid seed from URL: {entry}");
+                    }
+                }
+            } else {
+                eprintln!("warn: could not parse seed list from {url}");
+            }
+        } else {
+            eprintln!("warn: failed to fetch seeds from {url}");
+        }
+    }
 
     let db_path = cli
         .db
