@@ -34,7 +34,8 @@ const MAX_ADDR_TABLE: usize = 2000;
 const ADDR_EXPIRY_SECS: u64 = 7 * 24 * 3600;
 const TARGET_PEERS_FOR_GOSSIP: usize = 8;
 const MAX_ADDR_FAILS: u32 = 3;
-const DIAL_BACKOFF_SECS: u64 = 30;
+// Back off between dial attempts to the same addr; kept small for faster mesh formation.
+const DIAL_BACKOFF_SECS: u64 = 15;
 
 #[derive(Debug, Error)]
 pub enum P2pError {

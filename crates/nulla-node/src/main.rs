@@ -154,10 +154,11 @@ fn main() {
         let p2p_for_dial = Arc::clone(&p2p);
         let missing_getblocks = missing.clone();
         thread::spawn(move || loop {
-            thread::sleep(Duration::from_secs(30));
+            thread::sleep(Duration::from_secs(10));
+            // Try more peers more often; per-peer backoff still applies inside the engine.
             let targets = {
                 let mut eng = p2p_for_dial.lock().expect("p2p dial");
-                eng.next_dial_targets(2, Duration::from_secs(60))
+                eng.next_dial_targets(8, Duration::from_secs(10))
             };
             for addr in targets {
                 let _ = P2pEngine::connect_and_sync(
