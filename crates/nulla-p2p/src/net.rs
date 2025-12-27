@@ -334,7 +334,7 @@ impl HeaderStore {
         locator: &[Hash32],
         stop: Option<Hash32>,
         max: usize,
-    ) -> Vec<BlockHeader> {
+    ) -> Result<Vec<BlockHeader>, P2pError> {
         // Build the best chain from genesis forward.
         let mut chain = Vec::new();
         let mut cursor = self.best;
@@ -346,6 +346,19 @@ impl HeaderStore {
             cursor = entry.header.prev;
         }
         chain.reverse();
+
+        // Check if locator contains an incompatible genesis
+        if let Some(genesis_header) = chain.first() {
+            let our_genesis = block_header_hash(genesis_header).ok();
+            // Check if their locator ends with a different genesis (last element should be genesis)
+            if let Some(their_genesis) = locator.last() {
+                if *their_genesis != Hash32::zero() && our_genesis.is_some() && Some(*their_genesis) != our_genesis {
+                    return Err(P2pError::InvalidHeader(
+                        "incompatible genesis - peer is on different chain".into()
+                    ));
+                }
+            }
+        }
 
         // Find the first locator we know and start after it.
         let mut start_idx = 0usize;
@@ -371,7 +384,7 @@ impl HeaderStore {
             }
             out.push(hdr);
         }
-        out
+        Ok(out)
     }
 }
 
@@ -1149,7 +1162,7 @@ impl P2pEngine {
             Message::Ping(nonce) => Ok(vec![(peer_id, Message::Pong(nonce))]),
             Message::Pong(_) => Ok(Vec::new()),
             Message::GetHeaders { locator, stop } => {
-                let headers = self.store.get_headers_after(&locator, stop, MAX_HEADERS);
+                let headers = self.store.get_headers_after(&locator, stop, MAX_HEADERS)?;
                 Ok(vec![(peer_id, Message::Headers(headers))])
             }
             Message::Headers(headers) => {

@@ -10,7 +10,7 @@ Nulla is a privacy-first Proof-of-Work blockchain written in Rust. It targets pr
 
 ## Status
 
-- Consensus locked: genesis, tail emission v1, MTP(11) with +/-2h drift, LWMA difficulty targeting 60s (window 60) with per-block drop clamp, PoW vectors, transparent P2PKH txs (coinbase pays a transparent output).
+- Consensus locked: genesis, tail emission v1, MTP(11) with +/-24h drift, LWMA difficulty targeting 60s (window 60) with per-block drop clamp, PoW vectors, transparent P2PKH txs (coinbase pays a transparent output).
 - Chain identity locked: chain ID `0`, magic `NUL0`, address prefix `0x35`.
 - Persisted ChainStore: sled-backed headers/blocks/index/UTXOs + best tip; restart-safe with body reconciliation.
 - P2P v0: TCP header-first sync (version/verack, ping/pong, getheaders/headers), heaviest-work selection. Peers now advertise their listen port in `version` and only stable listen ports are gossiped; periodic `getaddr` runs even when target peers is met to refresh the table.
@@ -18,7 +18,7 @@ Nulla is a privacy-first Proof-of-Work blockchain written in Rust. It targets pr
 - Policy layer: reorg depth cap, peer scoring/bans, basic rate limits (non-consensus).
 - Wallet: transparent CLI (keygen/address/encrypted storage/rescan/balance/list/send) via node RPC; Tauri GUI scaffold (start/stop node, balance/UTXO view, send/rescan, address management).
 - Mempool/Fees: transparent tx acceptance wired to ChainStore UTXO view; base fee enforced; miner includes mempool txs.
-- Sync + mining gating: mining is opt-in (`--mine` or `NULLA_MINE`; `--no-mine` overrides), waits until caught up to best peer height, requires peer_count ≥ 3 and ~90s stability; follower/seed mode stays off.
+- Sync + mining gating: mining is opt-in (`--mine` or `NULLA_MINE`; `--no-mine` overrides), waits until caught up to best peer height by default, requires peer_count ≥ 1 and ~90s stability; optional `--mine-while-behind` (or `NULLA_MINE_WHILE_BEHIND=1`) skips the catch-up gate; follower/seed mode stays off. A CLI progress bar shows catch-up status.
 - Networking bootstrap: seeds supported via `--seeds`/`NULLA_SEEDS` fallback when no explicit `--peers`.
 - RPC helpers: `get_balance`/`get_utxos` accept address or pubkey hash; submit/validate/chain info unchanged. RPC is newline-delimited JSON over TCP (not HTTP).
 - P2P tx relay: inv/get_tx/tx wired through the single mempool validation path.
@@ -36,7 +36,7 @@ Nulla is a privacy-first Proof-of-Work blockchain written in Rust. It targets pr
 - **ChainStore / ChainDB:** sled-backed storage for headers, blocks, index entries `{hash,height,prev,bits,time,cumulative_work}`, UTXO index (including coinbase), and best tip with recovery coverage.
 - **Fork Choice:** heaviest cumulative work with deterministic tie-breaker; difficulty-drop clamp enforced everywhere; single validation entrypoint (no bypass).
 - **P2P v0 (header-first):** TCP transport, locators, fork handling, restart safety. Dev-only easy PoW lives behind the `dev-pow` feature for tests/vector generation.
-- **Node:** devnet miner loop wired through ChainStore and P2pEngine; LWMA difficulty targeting 60s with drop clamp; block download restricted to the best chain.
+- **Node:** devnet miner loop wired through ChainStore and P2pEngine; LWMA difficulty targeting 60s with drop clamp; block download restricted to the best chain; catch-up progress bar while syncing.
 - **Mempool/Fees:** transparent tx acceptance with base fee policy; txs reannounced over P2P.
 
 ---
@@ -63,7 +63,7 @@ Node (must be running for wallet operations)
 - Seed node (no mining, public port):
   ```bash
   RUST_LOG=info NULLA_RPC_LISTEN=127.0.0.1:27445 \
-  cargo run -p nulla-node -- \
+  cargo run -p nulla-node --bin nulla-node -- \
     --role seed \
     --listen 0.0.0.0:27444 \
     --gossip
@@ -72,7 +72,7 @@ Node (must be running for wallet operations)
 - Miner example (Linux/macOS shell):
   ```bash
   RUST_LOG=info NULLA_RPC_LISTEN=127.0.0.1:27447 \
-  cargo run -p nulla-node -- \
+  cargo run -p nulla-node --bin nulla-node -- \
     --mine \
     --miner-address <Base58 addr> \
     --listen 0.0.0.0:27444 \
@@ -84,7 +84,7 @@ Node (must be running for wallet operations)
   ```powershell
   $env:NULLA_RPC_LISTEN = "127.0.0.1:27447"
   $env:RUST_LOG = "info"
-  cargo run -p nulla-node -- `
+  cargo run -p nulla-node --bin nulla-node -- `
     --mine `
     --miner-address <Base58 addr> `
     --listen 0.0.0.0:27444 `
@@ -131,13 +131,13 @@ GUI (Tauri preview; TCP JSON RPC)
 Two-node example (header + block + tx relay)
 ```bash
 # Node A (default listen 27444, RPC 27445)
-cargo run -p nulla-node
+cargo run -p nulla-node --bin nulla-node
 
 # Node B (custom listen/RPC, connect to A)
 NULLA_LISTEN=127.0.0.1:27446 \
 NULLA_PEERS=127.0.0.1:27444 \
 NULLA_RPC_LISTEN=127.0.0.1:27447 \
-cargo run -p nulla-node
+cargo run -p nulla-node --bin nulla-node
 ```
 
 Multi-node walkthrough: see `docs/multinode.md` for full P2P+wallet steps.
@@ -183,13 +183,13 @@ Notes:
 Two-node sanity (ops quickcheck)
 ```
 # Node A (miner)
-cargo run -p nulla-node -- --miner-address <addrA>
+cargo run -p nulla-node --bin nulla-node -- --miner-address <addrA>
 
 # Node B (follower, no mining)
 NULLA_LISTEN=127.0.0.1:27446 \
 NULLA_PEERS=127.0.0.1:27444 \
 NULLA_RPC_LISTEN=127.0.0.1:27447 \
-cargo run -p nulla-node -- --no-mine
+cargo run -p nulla-node --bin nulla-node -- --no-mine
 
 # Wallet A: init + send via node A RPC
 cargo run -p nulla-wallet -- --rpc 127.0.0.1:27445 send --to <addrB> --amount <atoms>
