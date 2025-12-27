@@ -16,7 +16,7 @@ use std::sync::{
     Arc, Mutex,
 };
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bs58::decode as b58decode;
 use mempool::{Mempool, SubmitError as MempoolSubmitError};
@@ -245,6 +245,7 @@ fn main() {
     let sync_stable_secs = 90u64;
     let mut sync_stable_since: Option<std::time::Instant> = None;
     let mut last_block_reason: Option<String> = None;
+    let mut last_gate_log = Instant::now();
     loop {
         let best_height = { chain.lock().expect("chain lock").best_entry().height };
         let (peer_height, peer_count) = {
@@ -294,9 +295,13 @@ fn main() {
             if let Ok(mut r) = mining_block_reason.lock() {
                 *r = Some(reason.clone());
             }
-            if last_block_reason.as_ref() != Some(&reason) {
+            let now = Instant::now();
+            if last_block_reason.as_ref() != Some(&reason)
+                || now.saturating_duration_since(last_gate_log) >= Duration::from_secs(30)
+            {
                 println!("Mining paused: {reason}");
                 last_block_reason = Some(reason);
+                last_gate_log = now;
             }
             thread::sleep(Duration::from_millis(200));
             continue;

@@ -1,4 +1,5 @@
 /target
+/target-temp
 /nulla.chain.db/
 /nulla.p2p.db/
 /*.db/
