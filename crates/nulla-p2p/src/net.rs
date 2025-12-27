@@ -21,6 +21,7 @@ use thiserror::Error;
 const TREE_HEADERS: &str = "headers";
 const TREE_META: &str = "meta";
 const TREE_BLOCKS: &str = "blocks";
+const TREE_ADDRS: &str = "addrbook";
 const KEY_BEST: &[u8] = b"best";
 const MAX_MSG_LEN: usize = 1 * 1024 * 1024; // 1MB hard cap
 const MAX_HEADERS: usize = 64;
@@ -31,6 +32,8 @@ const MAX_ADDR_RESP: usize = 256;
 const MAX_ADDR_TABLE: usize = 2000;
 const ADDR_EXPIRY_SECS: u64 = 7 * 24 * 3600;
 const TARGET_PEERS_FOR_GOSSIP: usize = 8;
+const MAX_ADDR_FAILS: u32 = 3;
+const DIAL_BACKOFF_SECS: u64 = 30;
 
 #[derive(Debug, Error)]
 pub enum P2pError {
@@ -149,6 +152,10 @@ impl HeaderStore {
             store.best = h;
         }
         Ok(store)
+    }
+
+    pub fn db(&self) -> sled::Db {
+        self._db.clone()
     }
 
     pub fn best_hash(&self) -> Hash32 {
@@ -436,29 +443,39 @@ pub struct P2pEngine {
     gossip_enabled: bool,
     addr_book: HashMap<SocketAddr, u64>, // last_seen
     dial_history: HashMap<SocketAddr, Instant>,
+    dial_failures: HashMap<SocketAddr, u32>,
     static_peers: HashSet<SocketAddr>,
     on_block: Option<Arc<dyn Fn(&Block) -> Result<(), String> + Send + Sync>>,
     on_tx: Option<Arc<dyn Fn(&Transaction) -> Result<(), String> + Send + Sync>>,
     has_tx: Option<Arc<dyn Fn(&Hash32) -> bool + Send + Sync>>,
     lookup_tx: Option<Arc<dyn Fn(&Hash32) -> Option<Transaction> + Send + Sync>>,
+    addr_tree: sled::Tree,
 }
 
 impl P2pEngine {
     pub fn new(path: &Path, genesis: BlockHeader) -> Result<Self, P2pError> {
+        let store = HeaderStore::open(path, genesis)?;
+        let addr_tree = store
+            .db()
+            .open_tree(TREE_ADDRS)
+            .map_err(|e| P2pError::Io(e.to_string()))?;
+        let addr_book = Self::load_addr_book(&addr_tree);
         Ok(Self {
-            store: HeaderStore::open(path, genesis)?,
+            store,
             peers: HashMap::new(),
             outbound: HashMap::new(),
             next_peer_id: 0,
             policy: Policy::default(),
             gossip_enabled: true,
-            addr_book: HashMap::new(),
+            addr_book,
             dial_history: HashMap::new(),
+            dial_failures: HashMap::new(),
             static_peers: HashSet::new(),
             on_block: None,
             on_tx: None,
             has_tx: None,
             lookup_tx: None,
+            addr_tree,
         })
     }
 
@@ -467,20 +484,28 @@ impl P2pEngine {
         genesis: BlockHeader,
         policy: Policy,
     ) -> Result<Self, P2pError> {
+        let store = HeaderStore::open(path, genesis)?;
+        let addr_tree = store
+            .db()
+            .open_tree(TREE_ADDRS)
+            .map_err(|e| P2pError::Io(e.to_string()))?;
+        let addr_book = Self::load_addr_book(&addr_tree);
         Ok(Self {
-            store: HeaderStore::open(path, genesis)?,
+            store,
             peers: HashMap::new(),
             outbound: HashMap::new(),
             next_peer_id: 0,
             policy,
             gossip_enabled: true,
-            addr_book: HashMap::new(),
+            addr_book,
             dial_history: HashMap::new(),
+            dial_failures: HashMap::new(),
             static_peers: HashSet::new(),
             on_block: None,
             on_tx: None,
             has_tx: None,
             lookup_tx: None,
+            addr_tree,
         })
     }
 
@@ -583,6 +608,9 @@ impl P2pEngine {
     }
 
     fn insert_addr(&mut self, addr: SocketAddr, now: u64) {
+        if !Self::valid_gossip_addr(&addr) {
+            return;
+        }
         if self.addr_book.len() >= MAX_ADDR_TABLE {
             // simple LRU-ish: drop oldest
             if let Some(oldest) = self
@@ -592,9 +620,57 @@ impl P2pEngine {
                 .map(|(k, _)| *k)
             {
                 self.addr_book.remove(&oldest);
+                let _ = self.addr_tree.remove(oldest.to_string().as_bytes());
             }
         }
         self.addr_book.insert(addr, now);
+        // Persist with last_seen as BE bytes.
+        let _ = self
+            .addr_tree
+            .insert(addr.to_string().as_bytes(), &now.to_be_bytes());
+    }
+
+    fn load_addr_book(tree: &sled::Tree) -> HashMap<SocketAddr, u64> {
+        let mut out = HashMap::new();
+        let now = SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        for item in tree.iter() {
+            if let Ok((k, v)) = item {
+                if v.len() != 8 {
+                    let _ = tree.remove(k);
+                    continue;
+                }
+                let mut last = [0u8; 8];
+                last.copy_from_slice(&v);
+                let last_seen = u64::from_be_bytes(last);
+                let key = String::from_utf8_lossy(&k).to_string();
+                if let Ok(addr) = key.parse::<SocketAddr>() {
+                    if !Self::valid_gossip_addr(&addr) {
+                        let _ = tree.remove(k);
+                        continue;
+                    }
+                    if now.saturating_sub(last_seen) > ADDR_EXPIRY_SECS {
+                        let _ = tree.remove(k);
+                        continue;
+                    }
+                    out.insert(addr, last_seen);
+                } else {
+                    let _ = tree.remove(k);
+                }
+            }
+        }
+        // Cap to MAX_ADDR_TABLE by dropping oldest.
+        if out.len() > MAX_ADDR_TABLE {
+            let mut items: Vec<(SocketAddr, u64)> = out.iter().map(|(a, t)| (*a, *t)).collect();
+            items.sort_by_key(|(_, t)| *t);
+            for (addr, _) in items.into_iter().take(out.len().saturating_sub(MAX_ADDR_TABLE)) {
+                out.remove(&addr);
+                let _ = tree.remove(addr.to_string().as_bytes());
+            }
+        }
+        out
     }
 
     fn connected_addrs(&self) -> HashSet<SocketAddr> {
@@ -623,8 +699,20 @@ impl P2pEngine {
                 continue;
             }
             if let Some(ts) = self.dial_history.get(&addr) {
-                if now.saturating_duration_since(*ts) < min_interval {
+                let failures = self.dial_failures.get(&addr).copied().unwrap_or(0);
+                let backoff = Duration::from_secs(
+                    failures.saturating_mul(DIAL_BACKOFF_SECS as u32) as u64,
+                );
+                let wait = min_interval + backoff;
+                if now.saturating_duration_since(*ts) < wait {
                     continue;
+                }
+                if failures >= MAX_ADDR_FAILS {
+                    let cooloff =
+                        Duration::from_secs(DIAL_BACKOFF_SECS * failures as u64);
+                    if now.saturating_duration_since(*ts) < cooloff {
+                        continue;
+                    }
                 }
             }
             self.dial_history.insert(addr, now);
@@ -669,6 +757,17 @@ impl P2pEngine {
             }
         }
         out
+    }
+
+    fn record_dial_failure(&mut self, addr: SocketAddr) {
+        let count = self.dial_failures.entry(addr).or_insert(0);
+        *count = count.saturating_add(1);
+        self.dial_history.insert(addr, Instant::now());
+    }
+
+    fn record_dial_success(&mut self, addr: SocketAddr) {
+        self.dial_failures.remove(&addr);
+        self.dial_history.insert(addr, Instant::now());
     }
 
     fn valid_gossip_addr(addr: &SocketAddr) -> bool {
@@ -1122,7 +1221,11 @@ impl P2pEngine {
         initial_getblocks: Vec<Hash32>,
     ) -> Result<thread::JoinHandle<()>, P2pError> {
         info!("p2p: dialing {}", addr);
-        let mut stream = TcpStream::connect(addr).map_err(|e| P2pError::Io(e.to_string()))?;
+        let mut stream = TcpStream::connect(addr).map_err(|e| {
+            let mut eng = engine.lock().expect("engine");
+            eng.record_dial_failure(addr);
+            P2pError::Io(e.to_string())
+        })?;
         stream
             .set_nodelay(true)
             .map_err(|e| P2pError::Io(e.to_string()))?;
@@ -1161,6 +1264,7 @@ impl P2pEngine {
         let (tx_out, rx_out) = mpsc::channel::<Message>();
         {
             let mut eng = engine.lock().expect("engine");
+            eng.record_dial_success(addr);
             eng.outbound.insert(peer_id, tx_out.clone());
             if let Some(ps) = eng.peers.get_mut(&peer_id) {
                 ps.addr = Some(addr);
