@@ -13,6 +13,7 @@ tempfile = "3.10"
 num-bigint = "0.4"
 hex-literal = "0.4"
 log = "0.4"
+serde = { version = "1", features = ["derive"] }
 
 [features]
 default = []
