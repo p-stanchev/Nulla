@@ -136,6 +136,7 @@ fn main() {
         },
     )
     .expect("p2p init");
+    p2p.set_advertised_port(cfg.listen.port());
     // Prioritize user-supplied peers and seeds in the dialer table so we keep retrying them
     // even if gossip is off or the addresses are non-public (e.g., LAN testing).
     let mut dial_roots = cfg.peers.clone();

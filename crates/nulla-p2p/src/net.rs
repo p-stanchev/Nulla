@@ -377,6 +377,8 @@ impl HeaderStore {
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub struct Version {
     pub height: u64,
+    // Advertised listen port (0 if not routable / not set). IP is inferred from socket addr.
+    pub listen_port: u16,
 }
 
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
@@ -452,6 +454,7 @@ pub struct P2pEngine {
     dial_failures: HashMap<SocketAddr, u32>,
     static_peers: HashSet<SocketAddr>,
     last_global_getaddr: Option<Instant>,
+    advertised_port: Option<u16>,
     on_block: Option<Arc<dyn Fn(&Block) -> Result<(), String> + Send + Sync>>,
     on_tx: Option<Arc<dyn Fn(&Transaction) -> Result<(), String> + Send + Sync>>,
     has_tx: Option<Arc<dyn Fn(&Hash32) -> bool + Send + Sync>>,
@@ -487,6 +490,7 @@ impl P2pEngine {
             dial_failures: HashMap::new(),
             static_peers: HashSet::new(),
             last_global_getaddr: None,
+            advertised_port: None,
             on_block: None,
             on_tx: None,
             has_tx: None,
@@ -518,6 +522,7 @@ impl P2pEngine {
             dial_failures: HashMap::new(),
             static_peers: HashSet::new(),
             last_global_getaddr: None,
+            advertised_port: None,
             on_block: None,
             on_tx: None,
             has_tx: None,
@@ -581,6 +586,10 @@ impl P2pEngine {
 
     pub fn addr_table_len(&self) -> usize {
         self.addr_book.len()
+    }
+
+    pub fn set_advertised_port(&mut self, port: u16) {
+        self.advertised_port = Some(port);
     }
 
     /// Snapshot of addr book contents (unordered, may include stale entries).
@@ -950,12 +959,24 @@ impl P2pEngine {
                 peer.version_seen = true;
                 if let Message::Version(v) = &msg {
                     peer.height = v.height;
+                    if v.listen_port != 0 {
+                        if let Some(addr) = peer.addr {
+                            let mut announced = addr;
+                            announced.set_port(v.listen_port);
+                            let now = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs();
+                            self.insert_addr(announced, now);
+                        }
+                    }
                 }
                 let mut out = vec![(peer_id, Message::Verack)];
                 out.push((
                     peer_id,
                     Message::Version(Version {
                         height: self.store.best_entry().height,
+                        listen_port: self.advertised_port.unwrap_or(0),
                     }),
                 ));
                 if first_version {
@@ -1277,17 +1298,8 @@ impl P2pEngine {
                 let (tx_out, rx_out) = mpsc::channel::<Message>();
                 let mut guard = engine.lock().expect("engine");
                 let peer_id = guard.next_peer_id();
-                if guard.gossip_enabled {
-                    if let Some(pa) = peer_addr {
-                        let now = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs();
-                        if Self::valid_gossip_addr(&pa) {
-                            guard.insert_addr(pa, now);
-                        }
-                    }
-                }
+                // Do not ingest the ephemeral inbound socket into the addr book; we only
+                // gossip stable listen ports that peers advertise via Version.
                 guard.outbound.insert(peer_id, tx_out.clone());
                 let ps = guard.peers.entry(peer_id).or_insert_with(PeerState::default);
                 ps.addr = peer_addr;
@@ -1351,7 +1363,7 @@ impl P2pEngine {
         stream
             .set_read_timeout(None)
             .map_err(|e| P2pError::Io(e.to_string()))?;
-        let (peer_id, locator, height) = {
+        let (peer_id, locator, height, listen_port) = {
             let mut eng = engine.lock().expect("engine");
             if eng.gossip_enabled && P2pEngine::valid_gossip_addr(&addr) {
                 let now = std::time::SystemTime::now()
@@ -1364,10 +1376,17 @@ impl P2pEngine {
                 eng.next_peer_id(),
                 eng.store.locator(),
                 eng.best_entry().height,
+                eng.advertised_port.unwrap_or(0),
             )
         };
 
-        P2pEngine::write_message(&mut stream, &Message::Version(Version { height }))?;
+        P2pEngine::write_message(
+            &mut stream,
+            &Message::Version(Version {
+                height,
+                listen_port,
+            }),
+        )?;
         P2pEngine::write_message(&mut stream, &Message::Verack)?;
         P2pEngine::write_message(
             &mut stream,

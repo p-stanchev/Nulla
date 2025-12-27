@@ -13,7 +13,7 @@ Nulla is a privacy-first Proof-of-Work blockchain written in Rust. It targets pr
 - Consensus locked: genesis, tail emission v1, MTP(11) with +/-2h drift, LWMA difficulty targeting 60s (window 60) with per-block drop clamp, PoW vectors, transparent P2PKH txs (coinbase pays a transparent output).
 - Chain identity locked: chain ID `0`, magic `NUL0`, address prefix `0x35`.
 - Persisted ChainStore: sled-backed headers/blocks/index/UTXOs + best tip; restart-safe with body reconciliation.
-- P2P v0: TCP header-first sync (version/verack, ping/pong, getheaders/headers), heaviest-work selection.
+- P2P v0: TCP header-first sync (version/verack, ping/pong, getheaders/headers), heaviest-work selection. Peers now advertise their listen port in `version` and only stable listen ports are gossiped; periodic `getaddr` runs even when target peers is met to refresh the table.
 - Block download: best-chain-only path with strict header<->block checks.
 - Policy layer: reorg depth cap, peer scoring/bans, basic rate limits (non-consensus).
 - Wallet: transparent CLI (keygen/address/encrypted storage/rescan/balance/list/send) via node RPC; Tauri GUI scaffold (start/stop node, balance/UTXO view, send/rescan, address management).
@@ -68,6 +68,7 @@ Node (must be running for wallet operations)
     --listen 0.0.0.0:27444 \
     --gossip
   ```
+  (Only advertised listen ports are shared; inbound socket ports are ignored. Make sure the listen port is reachable/forwarded.)
 - Miner example (Linux/macOS shell):
   ```bash
   RUST_LOG=info NULLA_RPC_LISTEN=127.0.0.1:27447 \
