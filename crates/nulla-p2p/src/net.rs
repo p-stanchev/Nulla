@@ -1389,6 +1389,9 @@ impl P2pEngine {
                     let guard = eng_hb.lock().ok();
                     if let Some(mut eng) = guard {
                         let connected = eng.peer_count();
+                        let relay_slots = eng.relay_slots.len();
+                        let relay_cap = eng.relay_config.relay_cap;
+                        let relay_clients = eng.relay_slot_clients.len();
                         let outbound = eng
                             .peers
                             .values()
@@ -1401,8 +1404,14 @@ impl P2pEngine {
                             .count();
                         let addr_table = eng.addr_book.len();
                         info!(
-                            "net: peers connected={} outbound={} inbound={} addr_table={}",
-                            connected, outbound, inbound, addr_table
+                            "net: peers connected={} outbound={} inbound={} addr_table={} relay_slots={}/{} relay_clients={}",
+                            connected,
+                            outbound,
+                            inbound,
+                            addr_table,
+                            relay_slots,
+                            relay_cap,
+                            relay_clients
                         );
                         // Periodic global getaddr even when target peers is met, to refresh tables.
                         if eng.gossip_enabled {
