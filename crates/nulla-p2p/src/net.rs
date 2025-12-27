@@ -1611,127 +1611,158 @@ impl P2pEngine {
         addr: SocketAddr,
         initial_getblocks: Vec<Hash32>,
     ) -> Result<thread::JoinHandle<()>, P2pError> {
-        info!("p2p: dialing {}", addr);
-        let mut stream = TcpStream::connect(addr).map_err(|e| {
-            let mut eng = engine.lock().expect("engine");
-            eng.record_dial_failure(addr);
-            if eng.relay_config.request_relay {
-                eng.relay_no_request.insert(addr);
-            }
-            warn!("p2p: connect to {} failed: {}", addr, e);
-            P2pError::Io(e.to_string())
-        })?;
-        stream
-            .set_nodelay(true)
-            .map_err(|e| P2pError::Io(e.to_string()))?;
-        // Allow blocking reads so idle peers are not dropped due to timeouts.
-        stream
-            .set_read_timeout(None)
-            .map_err(|e| P2pError::Io(e.to_string()))?;
-        let (peer_id, locator, height, listen_port, relay_cfg, request_relay) = {
-            let mut eng = engine.lock().expect("engine");
-            if eng.gossip_enabled && P2pEngine::valid_gossip_addr(&addr) {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
-                eng.insert_addr(addr, now);
-            }
-            let request_relay = eng.relay_config.request_relay
-                && !eng.relay_no_request.contains(&addr);
-            (
-                eng.next_peer_id(),
-                eng.store.locator(),
-                eng.best_entry().height,
-                eng.advertised_port.unwrap_or(0),
-                eng.relay_config,
-                request_relay,
-            )
+        // First attempt with request_relay (if enabled); on failure or early drop, retry without it.
+        let mut attempt_request_relay = {
+            let eng = engine.lock().expect("engine");
+            eng.relay_config.request_relay && !eng.relay_no_request.contains(&addr)
         };
-
-        P2pEngine::write_message(
-            &mut stream,
-            &Message::Version(Version {
-                height,
-                listen_port,
-                node_id: relay_cfg.node_id,
-                request_relay,
-                provide_relay: relay_cfg.provide_relay && relay_cfg.relay_cap > 0,
-            }),
-        )?;
-        P2pEngine::write_message(&mut stream, &Message::Verack)?;
-        P2pEngine::write_message(
-            &mut stream,
-            &Message::GetHeaders {
-                locator,
-                stop: None,
-            },
-        )?;
-        for h in &initial_getblocks {
-            let _ = P2pEngine::write_message(&mut stream, &Message::GetBlock(*h));
-        }
-
-        let (tx_out, rx_out) = mpsc::channel::<Message>();
-        {
-            let mut eng = engine.lock().expect("engine");
-            eng.record_dial_success(addr);
-            eng.outbound.insert(peer_id, tx_out.clone());
-            let ps = eng.peers.entry(peer_id).or_insert_with(PeerState::default);
-            ps.addr = Some(addr);
-            ps.outbound = true;
-            ps.request_relay = request_relay;
-        }
-        let eng = Arc::clone(&engine);
-        let handle = thread::spawn(move || {
-            let mut stream = stream;
-            loop {
-                while let Ok(m) = rx_out.try_recv() {
-                    if P2pEngine::write_message(&mut stream, &m).is_err() {
-                        break;
-                    }
-                }
-                let msg = match P2pEngine::read_message(&mut stream) {
-                    Ok(Some(m)) => m,
-                    Ok(None) => break,
-                    Err(e) => {
-                        warn!("p2p: read error from {}: {}", addr, e);
-                        break;
-                    }
-                };
-                let send_result = {
-                    let mut p2p = eng.lock().expect("engine");
-                    match p2p.handle_message(peer_id, msg) {
-                        Ok(out) => {
-                            for (pid, m) in out {
-                                let _ = p2p.send_to(pid, m);
-                            }
-                            Ok(())
-                        }
-                        Err(e) => {
-                            warn!("p2p: peer {} dropped due to {}", addr, e);
-                            Err(e)
-                        }
-                    }
-                };
-                if send_result.is_err() {
-                    break;
-                }
-            }
-            let mut eng = eng.lock().expect("engine");
-            if eng.relay_config.request_relay && !eng.relay_no_request.contains(&addr) {
-                if let Some(ps) = eng.peers.get(&peer_id) {
-                    if ps.outbound && ps.request_relay && !ps.verack_seen {
+        let initial_getblocks_for_retry = initial_getblocks.clone();
+        loop {
+            info!("p2p: dialing {}", addr);
+            let mut stream = match TcpStream::connect(addr) {
+                Ok(s) => s,
+                Err(e) => {
+                    let mut eng = engine.lock().expect("engine");
+                    eng.record_dial_failure(addr);
+                    if attempt_request_relay {
                         eng.relay_no_request.insert(addr);
-                        debug!(
-                            "p2p: disabling request_relay for {} after early disconnect",
-                            addr
+                        warn!(
+                            "p2p: connect to {} failed with request_relay; retrying without it: {}",
+                            addr, e
                         );
+                        attempt_request_relay = false;
+                        continue;
+                    }
+                    warn!("p2p: connect to {} failed: {}", addr, e);
+                    return Err(P2pError::Io(e.to_string()));
+                }
+            };
+            stream
+                .set_nodelay(true)
+                .map_err(|e| P2pError::Io(e.to_string()))?;
+            // Allow blocking reads so idle peers are not dropped due to timeouts.
+            stream
+                .set_read_timeout(None)
+                .map_err(|e| P2pError::Io(e.to_string()))?;
+            let (peer_id, locator, height, listen_port, relay_cfg, request_relay) = {
+                let mut eng = engine.lock().expect("engine");
+                if eng.gossip_enabled && P2pEngine::valid_gossip_addr(&addr) {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    eng.insert_addr(addr, now);
+                }
+                let request_relay = attempt_request_relay
+                    && eng.relay_config.request_relay
+                    && !eng.relay_no_request.contains(&addr);
+                (
+                    eng.next_peer_id(),
+                    eng.store.locator(),
+                    eng.best_entry().height,
+                    eng.advertised_port.unwrap_or(0),
+                    eng.relay_config,
+                    request_relay,
+                )
+            };
+
+            P2pEngine::write_message(
+                &mut stream,
+                &Message::Version(Version {
+                    height,
+                    listen_port,
+                    node_id: relay_cfg.node_id,
+                    request_relay,
+                    provide_relay: relay_cfg.provide_relay && relay_cfg.relay_cap > 0,
+                }),
+            )?;
+            P2pEngine::write_message(&mut stream, &Message::Verack)?;
+            P2pEngine::write_message(
+                &mut stream,
+                &Message::GetHeaders {
+                    locator,
+                    stop: None,
+                },
+            )?;
+            for h in &initial_getblocks {
+                let _ = P2pEngine::write_message(&mut stream, &Message::GetBlock(*h));
+            }
+
+            let (tx_out, rx_out) = mpsc::channel::<Message>();
+            {
+                let mut eng = engine.lock().expect("engine");
+                eng.record_dial_success(addr);
+                eng.outbound.insert(peer_id, tx_out.clone());
+                let ps = eng.peers.entry(peer_id).or_insert_with(PeerState::default);
+                ps.addr = Some(addr);
+                ps.outbound = true;
+                ps.request_relay = request_relay;
+            }
+            let eng = Arc::clone(&engine);
+            let eng_for_retry = Arc::clone(&engine);
+            let initial_getblocks_retry = initial_getblocks_for_retry.clone();
+            let handle = thread::spawn(move || {
+                let mut stream = stream;
+                let mut fallback_requested = false;
+                loop {
+                    while let Ok(m) = rx_out.try_recv() {
+                        if P2pEngine::write_message(&mut stream, &m).is_err() {
+                            break;
+                        }
+                    }
+                    let msg = match P2pEngine::read_message(&mut stream) {
+                        Ok(Some(m)) => m,
+                        Ok(None) => break,
+                        Err(e) => {
+                            warn!("p2p: read error from {}: {}", addr, e);
+                            break;
+                        }
+                    };
+                    let send_result = {
+                        let mut p2p = eng.lock().expect("engine");
+                        match p2p.handle_message(peer_id, msg) {
+                            Ok(out) => {
+                                for (pid, m) in out {
+                                    let _ = p2p.send_to(pid, m);
+                                }
+                                Ok(())
+                            }
+                            Err(e) => {
+                                warn!("p2p: peer {} dropped due to {}", addr, e);
+                                Err(e)
+                            }
+                        }
+                    };
+                    if send_result.is_err() {
+                        break;
                     }
                 }
-            }
-            eng.cleanup_peer(peer_id);
-        });
-        Ok(handle)
+                {
+                    let mut eng = eng.lock().expect("engine");
+                    if eng.relay_config.request_relay && !eng.relay_no_request.contains(&addr) {
+                        if let Some(ps) = eng.peers.get(&peer_id) {
+                            if ps.outbound && ps.request_relay && !ps.verack_seen {
+                                eng.relay_no_request.insert(addr);
+                                fallback_requested = true;
+                                debug!(
+                                    "p2p: disabling request_relay for {} after early disconnect",
+                                    addr
+                                );
+                            }
+                        }
+                    }
+                    eng.cleanup_peer(peer_id);
+                }
+                if fallback_requested {
+                    let _ = P2pEngine::connect_and_sync(
+                        Arc::clone(&eng_for_retry),
+                        addr,
+                        initial_getblocks_retry,
+                    );
+                }
+            });
+            return Ok(handle);
+        }
     }
 }
 
