@@ -303,11 +303,11 @@ fn main() {
             let guard = p2p.lock().expect("p2p");
             (guard.best_peer_height(), guard.peer_count())
         };
-        let syncing = best_height + 1 < peer_height;
+        let syncing = best_height < peer_height;
         is_syncing.store(syncing, Ordering::Relaxed);
 
         // Track stability window.
-        if !syncing && best_height + 1 >= peer_height {
+        if !syncing && best_height >= peer_height {
             if sync_stable_since.is_none() {
                 sync_stable_since = Some(std::time::Instant::now());
             }
@@ -324,9 +324,9 @@ fn main() {
                 "waiting for peers (have {}, need >= {})",
                 peer_count, min_peers_for_mining
             ));
-        } else if best_height + 1 < peer_height.saturating_sub(1) {
+        } else if best_height < peer_height {
             block_reason = Some(format!(
-                "waiting for chain catch-up (local {}, best peer {})",
+                "waiting for chain catch-up (need equal height; local {}, best peer {})",
                 best_height, peer_height
             ));
         } else if let Some(since) = sync_stable_since {

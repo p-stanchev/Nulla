@@ -7,6 +7,9 @@
 //! The PoW condition is:
 //!     header_hash_as_u256 <= target(bits)
 
+#[cfg(all(feature = "dev-pow", not(debug_assertions)))]
+compile_error!("dev-pow feature cannot be enabled in release builds");
+
 #[cfg(not(feature = "dev-pow"))]
 use crate::difficulty::{bits_to_target, hash_meets_target};
 use crate::error::ConsensusError;
@@ -20,7 +23,7 @@ pub fn pow_hash(header: &BlockHeader) -> Result<[u8; 32], ConsensusError> {
 
 /// Validate proof-of-work for a header (hash <= target(bits)).
 pub fn validate_pow(header: &BlockHeader) -> Result<(), ConsensusError> {
-    #[cfg(feature = "dev-pow")]
+    #[cfg(all(feature = "dev-pow", debug_assertions))]
     {
         let _ = header;
         // Test-only bypass to speed vector generation; real consensus must not enable this.
