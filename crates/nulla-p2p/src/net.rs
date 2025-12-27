@@ -390,6 +390,7 @@ impl HeaderStore {
 
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub struct Version {
+    pub protocol_version: u32,
     pub height: u64,
     // Advertised listen port (0 if not routable / not set). IP is inferred from socket addr.
     pub listen_port: u16,
@@ -1089,6 +1090,14 @@ impl P2pEngine {
                     let first = !peer.version_seen;
                     peer.version_seen = true;
                     if let Message::Version(v) = &msg {
+                        if v.protocol_version != PROTOCOL_VERSION {
+                            peer.disconnected = true;
+                            peer.score = peer.score.saturating_add(1);
+                            return Err(P2pError::Policy(format!(
+                                "protocol mismatch (peer={}, ours={})",
+                                v.protocol_version, PROTOCOL_VERSION
+                            )));
+                        }
                         peer.height = v.height;
                         peer.node_id = Some(v.node_id);
                         peer.request_relay = v.request_relay;
@@ -1115,6 +1124,7 @@ impl P2pEngine {
                 out.push((
                     peer_id,
                     Message::Version(Version {
+                        protocol_version: PROTOCOL_VERSION,
                         height: self.store.best_entry().height,
                         listen_port: self.advertised_port.unwrap_or(0),
                         node_id: self.relay_config.node_id,
@@ -1363,6 +1373,7 @@ impl P2pEngine {
                 if owns_slot {
                     let mut out = Vec::new();
                     let version = Message::Version(Version {
+                        protocol_version: PROTOCOL_VERSION,
                         height: self.store.best_entry().height,
                         listen_port: self.advertised_port.unwrap_or(0),
                         node_id: self.relay_config.node_id,
@@ -1682,6 +1693,7 @@ impl P2pEngine {
             P2pEngine::write_message(
                 &mut stream,
                 &Message::Version(Version {
+                    protocol_version: PROTOCOL_VERSION,
                     height,
                     listen_port,
                     node_id: relay_cfg.node_id,
@@ -2040,6 +2052,7 @@ mod tests {
         P2pEngine::write_message(
             &mut client,
             &Message::Version(Version {
+                protocol_version: PROTOCOL_VERSION,
                 height: 0,
                 listen_port: 0,
                 node_id: Hash32::zero(),
