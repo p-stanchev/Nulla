@@ -1257,7 +1257,8 @@ impl P2pEngine {
                     info!("p2p: incoming connection from {}", pa);
                 }
                 let _ = stream.set_nodelay(true);
-                let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
+                // Allow blocking reads so idle peers are not dropped due to timeouts.
+                let _ = stream.set_read_timeout(None);
                 let (tx_out, rx_out) = mpsc::channel::<Message>();
                 let mut guard = engine.lock().expect("engine");
                 let peer_id = guard.next_peer_id();
@@ -1334,8 +1335,9 @@ impl P2pEngine {
         stream
             .set_nodelay(true)
             .map_err(|e| P2pError::Io(e.to_string()))?;
+        // Allow blocking reads so idle peers are not dropped due to timeouts.
         stream
-            .set_read_timeout(Some(Duration::from_secs(10)))
+            .set_read_timeout(None)
             .map_err(|e| P2pError::Io(e.to_string()))?;
         let (peer_id, locator, height) = {
             let mut eng = engine.lock().expect("engine");
