@@ -30,8 +30,9 @@ use nulla_core::{
     GENESIS_TIMESTAMP, NETWORK_MAGIC, PROTOCOL_VERSION,
 };
 use nulla_node::chain_store::{ChainDb, ChainStore};
-use nulla_p2p::net::{Message, P2pEngine, Policy};
+use nulla_p2p::net::{Message, P2pEngine, Policy, RelayConfig};
 use nulla_state::{block_subsidy, LedgerState};
+use rand::Rng;
 
 /// Extremely easy difficulty for devnet (currently unused; retained for debug).
 #[allow(dead_code)]
@@ -68,6 +69,15 @@ struct Config {
     /// Optional TCP relay target (where to forward relay connections), e.g. 1.2.3.4:27444
     #[arg(long = "relay-target")]
     relay_target: Option<String>,
+    /// Enable automatic relay capability and accept relay slots (requires --relay-cap).
+    #[arg(long = "relay-auto")]
+    relay_auto: bool,
+    /// Maximum relay slots to serve (required when --relay-auto is set).
+    #[arg(long = "relay-cap")]
+    relay_cap: Option<u32>,
+    /// Request a relay slot when connecting outbound (for NAT’d nodes).
+    #[arg(long = "request-relay")]
+    request_relay: bool,
     /// Attempt NAT-PMP/UPnP port mapping for the listen port (opt-in).
     #[arg(long = "nat")]
     nat: bool,
@@ -111,6 +121,9 @@ fn main() {
             cfg.listen
         );
     }
+    if cfg.relay_auto && cfg.relay_cap == 0 {
+        eprintln!("warn: --relay-auto requires --relay-cap; relay remains disabled");
+    }
     if cfg.nat_enabled {
         maybe_open_nat(&cfg.listen);
     }
@@ -127,6 +140,12 @@ fn main() {
     // -----------------
     // P2P wiring (authoritative ingress)
     // -----------------
+    let relay_cfg = RelayConfig {
+        node_id: cfg.node_id,
+        request_relay: cfg.request_relay,
+        provide_relay: cfg.relay_auto && cfg.relay_cap > 0,
+        relay_cap: cfg.relay_cap,
+    };
     let mut p2p = P2pEngine::with_policy(
         &cfg.p2p_db_path,
         genesis_header,
@@ -134,6 +153,7 @@ fn main() {
             max_reorg_depth: Some(cfg.reorg_cap),
             ban_threshold: 3,
         },
+        relay_cfg,
     )
     .expect("p2p init");
     p2p.set_advertised_port(cfg.listen.port());
@@ -782,6 +802,16 @@ fn resolve_config(cli: Config) -> ResolvedConfig {
         .relay_target
         .or_else(|| env::var("NULLA_RELAY_TARGET").ok())
         .and_then(|s| s.parse().ok());
+    let relay_auto = cli.relay_auto || env::var("NULLA_RELAY_AUTO").is_ok();
+    let relay_cap = cli
+        .relay_cap
+        .or_else(|| {
+            env::var("NULLA_RELAY_CAP")
+                .ok()
+                .and_then(|v| v.parse().ok())
+        })
+        .unwrap_or(0);
+    let request_relay = cli.request_relay || env::var("NULLA_REQUEST_RELAY").is_ok();
 
     // Drop any self-references to avoid self-dial/loopback attempts.
     let listen_addr = listen;
@@ -851,6 +881,9 @@ fn resolve_config(cli: Config) -> ResolvedConfig {
         bootstrap_listen,
         relay_listen,
         relay_target,
+        relay_auto,
+        relay_cap,
+        request_relay,
         db_path,
         p2p_db_path,
         reorg_cap,
@@ -859,6 +892,11 @@ fn resolve_config(cli: Config) -> ResolvedConfig {
         mining_enabled,
         nat_enabled: cli.nat || env::var("NULLA_NAT").is_ok(),
         gossip_enabled,
+        node_id: {
+            let mut id = [0u8; 32];
+            rand::thread_rng().fill(&mut id);
+            Hash32::from(id)
+        },
     }
 }
 
@@ -869,6 +907,9 @@ struct ResolvedConfig {
     bootstrap_listen: Option<SocketAddr>,
     relay_listen: Option<SocketAddr>,
     relay_target: Option<SocketAddr>,
+    relay_auto: bool,
+    relay_cap: u32,
+    request_relay: bool,
     db_path: PathBuf,
     p2p_db_path: PathBuf,
     reorg_cap: u64,
@@ -877,6 +918,7 @@ struct ResolvedConfig {
     mining_enabled: bool,
     nat_enabled: bool,
     gossip_enabled: bool,
+    node_id: Hash32,
 }
 
 fn compute_best_chain_and_missing(db: &ChainDb) -> (Hash32, Vec<Hash32>, Vec<Hash32>) {
@@ -900,7 +942,10 @@ fn wait_for_missing(db: &ChainDb, chain: &[Hash32], timeout: Duration) {
     }
 }
 
-fn start_bootstrap_server(p2p: Arc<Mutex<P2pEngine>>, listen: SocketAddr) -> thread::JoinHandle<()> {
+fn start_bootstrap_server(
+    p2p: Arc<Mutex<P2pEngine>>,
+    listen: SocketAddr,
+) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         let listener = match TcpListener::bind(listen) {
             Ok(l) => l,
@@ -929,10 +974,7 @@ fn start_bootstrap_server(p2p: Arc<Mutex<P2pEngine>>, listen: SocketAddr) -> thr
                         for a in eng.addr_book_snapshot() {
                             set.insert(a);
                         }
-                        set.into_iter()
-                            .take(512)
-                            .map(|a| a.to_string())
-                            .collect()
+                        set.into_iter().take(512).map(|a| a.to_string()).collect()
                     } else {
                         Vec::new()
                     }

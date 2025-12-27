@@ -15,6 +15,8 @@ Two capability bits are exchanged during the initial version handshake:
 
 - `REQUEST_RELAY`: set by nodes that cannot accept inbound connections and want a relay slot.
 - `PROVIDE_RELAY`: set by nodes willing to serve as relays.
+  - Client knob: `--request-relay` (or `NULLA_REQUEST_RELAY=1`).
+  - Server knob: `--relay-auto` (or `NULLA_RELAY_AUTO=1`) together with `--relay-cap <N>`.
 
 Example handshake payload:
 
