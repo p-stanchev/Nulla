@@ -14,7 +14,7 @@ use nulla_consensus::{
 };
 use nulla_core::{
     Block, BlockHeader, GENESIS_HASH_BYTES, Hash32, Transaction, block_header_hash, txid,
-    PROTOCOL_VERSION,
+    NETWORK_MAGIC, PROTOCOL_VERSION,
 };
 use num_bigint::BigUint;
 use std::net::IpAddr;
@@ -392,6 +392,8 @@ impl HeaderStore {
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub struct Version {
     pub protocol_version: u16,
+    pub network_magic: [u8; 4],
+    pub genesis: Hash32,
     pub height: u64,
     // Advertised listen port (0 if not routable / not set). IP is inferred from socket addr.
     pub listen_port: u16,
@@ -1099,6 +1101,16 @@ impl P2pEngine {
                                 v.protocol_version, PROTOCOL_VERSION
                             )));
                         }
+                        if v.network_magic != NETWORK_MAGIC {
+                            peer.disconnected = true;
+                            peer.score = peer.score.saturating_add(1);
+                            return Err(P2pError::Policy("network magic mismatch".into()));
+                        }
+                        if v.genesis != Hash32::from(GENESIS_HASH_BYTES) {
+                            peer.disconnected = true;
+                            peer.score = peer.score.saturating_add(1);
+                            return Err(P2pError::Policy("genesis hash mismatch".into()));
+                        }
                         peer.height = v.height;
                         peer.node_id = Some(v.node_id);
                         peer.request_relay = v.request_relay;
@@ -1126,6 +1138,8 @@ impl P2pEngine {
                     peer_id,
                     Message::Version(Version {
                         protocol_version: PROTOCOL_VERSION,
+                        network_magic: NETWORK_MAGIC,
+                        genesis: Hash32::from(GENESIS_HASH_BYTES),
                         height: self.store.best_entry().height,
                         listen_port: self.advertised_port.unwrap_or(0),
                         node_id: self.relay_config.node_id,
@@ -1375,6 +1389,8 @@ impl P2pEngine {
                     let mut out = Vec::new();
                     let version = Message::Version(Version {
                         protocol_version: PROTOCOL_VERSION,
+                        network_magic: NETWORK_MAGIC,
+                        genesis: Hash32::from(GENESIS_HASH_BYTES),
                         height: self.store.best_entry().height,
                         listen_port: self.advertised_port.unwrap_or(0),
                         node_id: self.relay_config.node_id,
@@ -1695,6 +1711,8 @@ impl P2pEngine {
                 &mut stream,
                 &Message::Version(Version {
                     protocol_version: PROTOCOL_VERSION,
+                    network_magic: NETWORK_MAGIC,
+                    genesis: Hash32::from(GENESIS_HASH_BYTES),
                     height,
                     listen_port,
                     node_id: relay_cfg.node_id,
@@ -2054,6 +2072,8 @@ mod tests {
             &mut client,
             &Message::Version(Version {
                 protocol_version: PROTOCOL_VERSION,
+                network_magic: NETWORK_MAGIC,
+                genesis: Hash32::from(GENESIS_HASH_BYTES),
                 height: 0,
                 listen_port: 0,
                 node_id: Hash32::zero(),
