@@ -14,6 +14,7 @@ use nulla_consensus::{
 };
 use nulla_core::{
     Block, BlockHeader, GENESIS_HASH_BYTES, Hash32, Transaction, block_header_hash, txid,
+    PROTOCOL_VERSION,
 };
 use num_bigint::BigUint;
 use std::net::IpAddr;
@@ -390,7 +391,7 @@ impl HeaderStore {
 
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub struct Version {
-    pub protocol_version: u32,
+    pub protocol_version: u16,
     pub height: u64,
     // Advertised listen port (0 if not routable / not set). IP is inferred from socket addr.
     pub listen_port: u16,
