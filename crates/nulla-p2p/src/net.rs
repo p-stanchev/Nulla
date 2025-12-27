@@ -38,6 +38,7 @@ const MAX_ADDR_FAILS: u32 = 3;
 const DIAL_BACKOFF_SECS: u64 = 15;
 const GLOBAL_GETADDR_SECS: u64 = 180;
 const GLOBAL_GETADDR_BATCH: usize = 2;
+const RELAY_IDLE_SECS: u64 = 15 * 60;
 
 #[derive(Debug, Error)]
 pub enum P2pError {
@@ -489,6 +490,7 @@ pub struct P2pEngine {
     relay_slot_by_peer: HashMap<u64, u32>,
     relay_slot_clients: HashMap<u32, u64>, // slot_id -> client peer_id
     relay_clients: HashMap<u64, u32>,      // client peer_id -> slot_id
+    relay_slot_last: HashMap<u32, Instant>, // slot_id -> last activity
     next_slot_id: u32,
     policy: Policy,
     gossip_enabled: bool,
@@ -531,6 +533,7 @@ impl P2pEngine {
             relay_slot_by_peer: HashMap::new(),
             relay_slot_clients: HashMap::new(),
             relay_clients: HashMap::new(),
+            relay_slot_last: HashMap::new(),
             next_slot_id: 0,
             policy: Policy::default(),
             gossip_enabled: true,
@@ -570,6 +573,7 @@ impl P2pEngine {
             relay_slot_by_peer: HashMap::new(),
             relay_slot_clients: HashMap::new(),
             relay_clients: HashMap::new(),
+            relay_slot_last: HashMap::new(),
             next_slot_id: 0,
             policy,
             gossip_enabled: true,
@@ -823,6 +827,7 @@ impl P2pEngine {
     fn cleanup_peer(&mut self, peer_id: u64) {
         if let Some(slot) = self.relay_slot_by_peer.remove(&peer_id) {
             self.relay_slots.remove(&slot);
+            self.relay_slot_last.remove(&slot);
             if let Some(client) = self.relay_slot_clients.remove(&slot) {
                 self.relay_clients.remove(&client);
             }
@@ -832,6 +837,29 @@ impl P2pEngine {
         }
         self.outbound.remove(&peer_id);
         self.peers.remove(&peer_id);
+    }
+
+    fn expire_idle_slots(&mut self, now: Instant) {
+        let idle_for = Duration::from_secs(RELAY_IDLE_SECS);
+        let mut to_drop = Vec::new();
+        for (&slot, &last) in self.relay_slot_last.iter() {
+            if now.saturating_duration_since(last) > idle_for {
+                to_drop.push(slot);
+            }
+        }
+        for slot in to_drop {
+            self.relay_slot_last.remove(&slot);
+            if let Some(owner) = self.relay_slots.remove(&slot) {
+                if let Some(peer) = self.peers.get_mut(&owner) {
+                    peer.relay_slot = None;
+                }
+                self.relay_slot_by_peer.remove(&owner);
+            }
+            if let Some(client) = self.relay_slot_clients.remove(&slot) {
+                self.relay_clients.remove(&client);
+            }
+            debug!("relay: expired idle slot {}", slot);
+        }
     }
 
     pub fn next_dial_targets(&mut self, max: usize, min_interval: Duration) -> Vec<SocketAddr> {
@@ -1083,10 +1111,12 @@ impl P2pEngine {
                     && peer_requested_relay
                     && self.relay_slots.len() < self.relay_config.relay_cap as usize
                 {
+                    let now = Instant::now();
                     let slot_id = self.next_slot_id;
                     self.next_slot_id = self.next_slot_id.wrapping_add(1);
                     self.relay_slots.insert(slot_id, peer_id);
                     self.relay_slot_by_peer.insert(peer_id, slot_id);
+                    self.relay_slot_last.insert(slot_id, now);
                     out.push((peer_id, Message::RelaySlot { slot_id }));
                 }
                 if first_version {
@@ -1352,6 +1382,7 @@ impl P2pEngine {
                         // Slot owner acknowledging receipt; avoid echoing to prevent loops.
                         return Ok(Vec::new());
                     }
+                    self.relay_slot_last.insert(slot_id, Instant::now());
                     self.relay_clients.insert(peer_id, slot_id);
                     self.relay_slot_clients.insert(slot_id, peer_id);
                     return Ok(vec![(owner, Message::RelayConnect { slot_id })]);
@@ -1362,6 +1393,7 @@ impl P2pEngine {
                 if self.relay_config.provide_relay && self.relay_config.relay_cap > 0 {
                     if let Some(&owner) = self.relay_slots.get(&slot_id) {
                         if owner == peer_id {
+                            self.relay_slot_last.insert(slot_id, Instant::now());
                             if let Some(&client) = self.relay_slot_clients.get(&slot_id) {
                                 return Ok(vec![(client, Message::RelayData { slot_id, payload })]);
                             }
@@ -1370,6 +1402,7 @@ impl P2pEngine {
                     }
                     if let Some(&slot) = self.relay_clients.get(&peer_id) {
                         if slot == slot_id {
+                            self.relay_slot_last.insert(slot_id, Instant::now());
                             if let Some(&owner) = self.relay_slots.get(&slot_id) {
                                 return Ok(vec![(owner, Message::RelayData { slot_id, payload })]);
                             }
@@ -1445,6 +1478,8 @@ impl P2pEngine {
                     thread::sleep(Duration::from_secs(30));
                     let guard = eng_hb.lock().ok();
                     if let Some(mut eng) = guard {
+                        let now = Instant::now();
+                        eng.expire_idle_slots(now);
                         let connected = eng.peer_count();
                         let relay_slots = eng.relay_slots.len();
                         let relay_cap = eng.relay_config.relay_cap;
