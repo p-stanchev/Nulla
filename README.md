@@ -26,7 +26,7 @@ Nulla is a privacy-first Proof-of-Work blockchain written in Rust. It targets pr
 - Fork mitigation: initial-sync gate + follower mode reduce accidental forks; consensus still resolves forks via heaviest work (forks cannot be eliminated entirely in PoW).
 - P2P safety caps: msg size 1MB, max 64 headers/response, max 1024 inv-tx entries, max 32 block requests, per-peer rate limit ~200 msgs/sec with ban score.
 - Mempool caps: max 5000 txs or ~5MB total; min relay fee > 0; evicts lowest fee-rate when full (policy, not consensus).
-- Gossip-lite (optional, default off): `--gossip` exchanges addr/getaddr with hard caps (256 addrs/response, 2k table, 7d expiry); only public IPs/port!=0; never required for sync.
+- Gossip-lite (default on, can disable): addr/getaddr with hard caps (256 addrs/response, 2k table, 7d expiry); only public IPs/port!=0; never required for sync. Disable with `--no-gossip` or `NULLA_NO_GOSSIP=1`.
 
 ---
 
@@ -66,7 +66,7 @@ Node (must be running for wallet operations)
     --miner-address <Base58 addr> \
     --listen 0.0.0.0:27446 \
     --db nulla.chain.miner.db \
-    --gossip \
+    --gossip \  # default on; disable with --no-gossip/NULLA_NO_GOSSIP
     --peers 45.155.53.102:27444,45.155.53.112:27444,45.155.53.126:27444
   ```
 - Miner example (Windows PowerShell):
@@ -78,11 +78,11 @@ Node (must be running for wallet operations)
     --miner-address <Base58 addr> `
     --listen 0.0.0.0:27446 `
     --db nulla.chain.miner.db `
-    --gossip `
+    --gossip `  # default on; disable with --no-gossip/NULLA_NO_GOSSIP
     --peers 45.155.53.102:27444,45.155.53.112:27444,45.155.53.126:27444
   ```
 - Defaults (mainnet-ready): listen `0.0.0.0:27444`, db `./nulla.chain.db`, reorg-cap `100`.  
-  Env fallbacks: `NULLA_LISTEN`, `NULLA_PEERS`, `NULLA_SEEDS`, `NULLA_DB`, `NULLA_REORG_CAP`, `NULLA_MINER_ADDRESS`, `NULLA_NO_MINE`.
+Env fallbacks: `NULLA_LISTEN`, `NULLA_PEERS`, `NULLA_SEEDS`, `NULLA_DB`, `NULLA_REORG_CAP`, `NULLA_MINER_ADDRESS`, `NULLA_NO_MINE`, `NULLA_NO_GOSSIP`.
 - RPC: `NULLA_RPC_LISTEN=127.0.0.1:27445` (default), `NULLA_RPC_AUTH_TOKEN` optional.
 - Seeds: `NULLA_SEEDS` (comma-separated `host:port`), used if no explicit `--peers` provided.
 - Sync/roles: mining and mempool processing stay off until local height catches the best peer height (initial-sync gate). Use `--no-mine`/`NULLA_NO_MINE` for follower/seed nodes.

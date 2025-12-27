@@ -63,6 +63,9 @@ struct Config {
     /// Enable addr gossip (optional; default off).
     #[arg(long = "gossip")]
     gossip: bool,
+    /// Disable addr gossip (override; default on).
+    #[arg(long = "no-gossip")]
+    no_gossip: bool,
     /// Path to ChainDB (sled)
     #[arg(long = "db")]
     db: Option<PathBuf>,
@@ -120,9 +123,11 @@ fn main() {
     if !dial_roots.is_empty() {
         p2p.add_static_peers(dial_roots);
     }
+    p2p.enable_gossip(cfg.gossip_enabled);
     if cfg.gossip_enabled {
-        p2p.enable_gossip(true);
         println!("Gossip-lite enabled (non-critical)");
+    } else {
+        println!("Gossip disabled by config");
     }
     {
         let db = Arc::clone(&chain_db);
@@ -773,7 +778,13 @@ fn resolve_config(cli: Config) -> ResolvedConfig {
         mining_enabled = false;
     }
 
-    let gossip_enabled = cli.gossip || env::var("NULLA_GOSSIP").is_ok();
+    // gossip default on; allow disable via flag/env.
+    let mut gossip_enabled = true;
+    if cli.no_gossip || env::var("NULLA_NO_GOSSIP").is_ok() {
+        gossip_enabled = false;
+    } else if cli.gossip || env::var("NULLA_GOSSIP").is_ok() {
+        gossip_enabled = true;
+    }
 
     ResolvedConfig {
         listen,
