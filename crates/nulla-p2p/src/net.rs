@@ -498,6 +498,8 @@ pub struct P2pEngine {
     dial_history: HashMap<SocketAddr, Instant>,
     dial_failures: HashMap<SocketAddr, u32>,
     static_peers: HashSet<SocketAddr>,
+    // Peers that previously rejected relay requests; retry without request_relay.
+    relay_no_request: HashSet<SocketAddr>,
     last_global_getaddr: Option<Instant>,
     advertised_port: Option<u16>,
     on_block: Option<Arc<dyn Fn(&Block) -> Result<(), String> + Send + Sync>>,
@@ -541,6 +543,7 @@ impl P2pEngine {
             dial_history: HashMap::new(),
             dial_failures: HashMap::new(),
             static_peers: HashSet::new(),
+            relay_no_request: HashSet::new(),
             last_global_getaddr: None,
             advertised_port: None,
             on_block: None,
@@ -581,6 +584,7 @@ impl P2pEngine {
             dial_history: HashMap::new(),
             dial_failures: HashMap::new(),
             static_peers: HashSet::new(),
+            relay_no_request: HashSet::new(),
             last_global_getaddr: None,
             advertised_port: None,
             on_block: None,
@@ -1611,6 +1615,9 @@ impl P2pEngine {
         let mut stream = TcpStream::connect(addr).map_err(|e| {
             let mut eng = engine.lock().expect("engine");
             eng.record_dial_failure(addr);
+            if eng.relay_config.request_relay {
+                eng.relay_no_request.insert(addr);
+            }
             warn!("p2p: connect to {} failed: {}", addr, e);
             P2pError::Io(e.to_string())
         })?;
@@ -1621,7 +1628,7 @@ impl P2pEngine {
         stream
             .set_read_timeout(None)
             .map_err(|e| P2pError::Io(e.to_string()))?;
-        let (peer_id, locator, height, listen_port, relay_cfg) = {
+        let (peer_id, locator, height, listen_port, relay_cfg, request_relay) = {
             let mut eng = engine.lock().expect("engine");
             if eng.gossip_enabled && P2pEngine::valid_gossip_addr(&addr) {
                 let now = std::time::SystemTime::now()
@@ -1630,12 +1637,15 @@ impl P2pEngine {
                     .as_secs();
                 eng.insert_addr(addr, now);
             }
+            let request_relay = eng.relay_config.request_relay
+                && !eng.relay_no_request.contains(&addr);
             (
                 eng.next_peer_id(),
                 eng.store.locator(),
                 eng.best_entry().height,
                 eng.advertised_port.unwrap_or(0),
                 eng.relay_config,
+                request_relay,
             )
         };
 
@@ -1645,7 +1655,7 @@ impl P2pEngine {
                 height,
                 listen_port,
                 node_id: relay_cfg.node_id,
-                request_relay: relay_cfg.request_relay,
+                request_relay,
                 provide_relay: relay_cfg.provide_relay && relay_cfg.relay_cap > 0,
             }),
         )?;
@@ -1669,6 +1679,7 @@ impl P2pEngine {
             let ps = eng.peers.entry(peer_id).or_insert_with(PeerState::default);
             ps.addr = Some(addr);
             ps.outbound = true;
+            ps.request_relay = request_relay;
         }
         let eng = Arc::clone(&engine);
         let handle = thread::spawn(move || {
@@ -1707,6 +1718,17 @@ impl P2pEngine {
                 }
             }
             let mut eng = eng.lock().expect("engine");
+            if eng.relay_config.request_relay && !eng.relay_no_request.contains(&addr) {
+                if let Some(ps) = eng.peers.get(&peer_id) {
+                    if ps.outbound && ps.request_relay && !ps.verack_seen {
+                        eng.relay_no_request.insert(addr);
+                        debug!(
+                            "p2p: disabling request_relay for {} after early disconnect",
+                            addr
+                        );
+                    }
+                }
+            }
             eng.cleanup_peer(peer_id);
         });
         Ok(handle)
