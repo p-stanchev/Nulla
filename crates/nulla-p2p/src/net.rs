@@ -631,6 +631,7 @@ impl P2pEngine {
     pub fn best_peer_height(&self) -> u64 {
         self.peers
             .values()
+            .filter(|p| !p.disconnected)
             .map(|p| p.height)
             .max()
             .unwrap_or(self.store.best_entry().height)
