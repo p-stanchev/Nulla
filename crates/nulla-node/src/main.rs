@@ -11,7 +11,7 @@ use std::collections::HashSet;
 use std::env;
 use std::fs;
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -687,6 +687,17 @@ fn current_time() -> u64 {
     time::OffsetDateTime::now_utc().unix_timestamp() as u64
 }
 
+/// Best-effort local IPv4 discovery for NAT mapping when listening on 0.0.0.0.
+fn detect_local_ipv4() -> Option<std::net::Ipv4Addr> {
+    // No packets are sent; connect() is used to ask the OS for the outbound interface.
+    let sock = UdpSocket::bind("0.0.0.0:0").ok()?;
+    sock.connect(("8.8.8.8", 53)).ok()?;
+    match sock.local_addr().ok()? {
+        SocketAddr::V4(v4) => Some(*v4.ip()),
+        SocketAddr::V6(_) => None,
+    }
+}
+
 /// XOR-combine two 32-byte hashes.
 fn xor_hash(a: Hash32, b: Hash32) -> Hash32 {
     let mut out = [0u8; 32];
@@ -701,11 +712,16 @@ fn maybe_open_nat(listen: &SocketAddr) {
     let external_port = listen.port();
     let internal_port = listen.port();
     let internal_ip = match listen.ip() {
-        std::net::IpAddr::V4(v4) => v4,
+        std::net::IpAddr::V4(v4) if !v4.is_unspecified() => Some(v4),
+        std::net::IpAddr::V4(_) => detect_local_ipv4(),
         std::net::IpAddr::V6(_) => {
             eprintln!("nat: IPv6 listen addr not supported for UPnP/NAT-PMP");
             return;
         }
+    };
+    let Some(internal_ip) = internal_ip else {
+        eprintln!("nat: could not determine a local IPv4 address; skipping UPnP/NAT-PMP");
+        return;
     };
     println!(
         "nat: attempting port map for {} -> {}:{}",
