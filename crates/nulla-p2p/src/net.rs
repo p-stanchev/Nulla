@@ -1295,6 +1295,42 @@ impl P2pEngine {
                 Ok(Vec::new())
             }
             Message::RelayConnect { slot_id } => {
+                let owns_slot = self
+                    .peers
+                    .get(&peer_id)
+                    .and_then(|p| p.relay_slot)
+                    .map_or(false, |s| s == slot_id);
+                if owns_slot {
+                    let mut out = Vec::new();
+                    let version = Message::Version(Version {
+                        height: self.store.best_entry().height,
+                        listen_port: self.advertised_port.unwrap_or(0),
+                        node_id: self.relay_config.node_id,
+                        request_relay: self.relay_config.request_relay,
+                        provide_relay: self.relay_config.provide_relay
+                            && self.relay_config.relay_cap > 0,
+                    });
+                    let locator = self.store.locator();
+                    for msg in [
+                        version,
+                        Message::Verack,
+                        Message::GetHeaders {
+                            locator: locator.clone(),
+                            stop: None,
+                        },
+                    ] {
+                        let payload = to_vec(&msg)
+                            .map_err(|e| P2pError::Io(format!("relay wrap: {e}")))?;
+                        out.push((
+                            peer_id,
+                            Message::RelayData {
+                                slot_id,
+                                payload,
+                            },
+                        ));
+                    }
+                    return Ok(out);
+                }
                 if !self.relay_config.provide_relay || self.relay_config.relay_cap == 0 {
                     return Ok(Vec::new());
                 }
@@ -1629,6 +1665,7 @@ mod tests {
         Amount, Commitment, OutPoint, PROTOCOL_VERSION, Transaction, TransactionKind,
         TransparentInput, TransparentOutput,
     };
+    use std::collections::HashSet;
     use std::net::TcpListener;
     use std::sync::{Arc, Mutex, mpsc};
     use std::time::Duration;
@@ -1741,6 +1778,54 @@ mod tests {
             .handle_message(1, Message::RelayConnect { slot_id: 9 })
             .unwrap();
         assert!(response.is_empty());
+    }
+
+    #[test]
+    fn relay_connect_forwarded_to_owner_bootstraps_handshake() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("db");
+        let genesis = genesis_header();
+        // Relay slot owner (requests relay, does not provide).
+        let relay_cfg = RelayConfig {
+            node_id: Hash32::zero(),
+            request_relay: true,
+            provide_relay: false,
+            relay_cap: 0,
+        };
+        let mut p2p = P2pEngine::new(&path, genesis, relay_cfg).unwrap();
+
+        let slot_id = 3u32;
+        // Slot announcement from relay.
+        let _ = p2p
+            .handle_message(1, Message::RelaySlot { slot_id })
+            .unwrap();
+
+        let responses = p2p
+            .handle_message(1, Message::RelayConnect { slot_id })
+            .unwrap();
+        assert_eq!(responses.len(), 3);
+
+        let mut kinds = HashSet::new();
+        for (pid, msg) in responses {
+            assert_eq!(pid, 1);
+            match msg {
+                Message::RelayData { slot_id: sid, payload } => {
+                    assert_eq!(sid, slot_id);
+                    let inner = Message::try_from_slice(&payload).unwrap();
+                    let label = match inner {
+                        Message::Version(_) => "version",
+                        Message::Verack => "verack",
+                        Message::GetHeaders { .. } => "getheaders",
+                        other => panic!("unexpected inner relay msg: {other:?}"),
+                    };
+                    kinds.insert(label);
+                }
+                other => panic!("unexpected outer msg: {other:?}"),
+            }
+        }
+        assert!(kinds.contains("version"));
+        assert!(kinds.contains("verack"));
+        assert!(kinds.contains("getheaders"));
     }
 
     #[test]
