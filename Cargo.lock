@@ -1197,6 +1197,7 @@ dependencies = [
  "nulla-p2p",
  "nulla-state",
  "num-bigint",
+ "rand",
  "reqwest",
  "serde_json",
  "sled",

@@ -16,8 +16,8 @@ use nulla_core::{
     Block, BlockHeader, GENESIS_HASH_BYTES, Hash32, Transaction, block_header_hash, txid,
 };
 use num_bigint::BigUint;
-use thiserror::Error;
 use std::net::IpAddr;
+use thiserror::Error;
 
 const TREE_HEADERS: &str = "headers";
 const TREE_META: &str = "meta";
@@ -379,6 +379,9 @@ pub struct Version {
     pub height: u64,
     // Advertised listen port (0 if not routable / not set). IP is inferred from socket addr.
     pub listen_port: u16,
+    pub node_id: Hash32,
+    pub request_relay: bool,
+    pub provide_relay: bool,
 }
 
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
@@ -409,6 +412,16 @@ pub enum Message {
         max: u16,
     },
     Addr(Vec<NetAddr>),
+    RelaySlot {
+        slot_id: u32,
+    },
+    RelayConnect {
+        slot_id: u32,
+    },
+    RelayData {
+        slot_id: u32,
+        payload: Vec<u8>, // serialized Message
+    },
 }
 
 #[derive(Default)]
@@ -417,6 +430,10 @@ struct PeerState {
     verack_seen: bool,
     disconnected: bool,
     height: u64,
+    node_id: Option<Hash32>,
+    request_relay: bool,
+    provide_relay: bool,
+    relay_slot: Option<u32>,
     score: u32,
     msg_count: u32,
     window_start: Option<Instant>,
@@ -442,11 +459,36 @@ impl Default for Policy {
     }
 }
 
+#[derive(Clone, Copy)]
+pub struct RelayConfig {
+    pub node_id: Hash32,
+    pub request_relay: bool,
+    pub provide_relay: bool,
+    pub relay_cap: u32,
+}
+
+impl RelayConfig {
+    pub fn disabled(node_id: Hash32) -> Self {
+        Self {
+            node_id,
+            request_relay: false,
+            provide_relay: false,
+            relay_cap: 0,
+        }
+    }
+}
+
 pub struct P2pEngine {
     store: HeaderStore,
     peers: HashMap<u64, PeerState>,
     outbound: HashMap<u64, mpsc::Sender<Message>>,
     next_peer_id: u64,
+    relay_config: RelayConfig,
+    relay_slots: HashMap<u32, u64>, // slot_id -> peer_id (owner)
+    relay_slot_by_peer: HashMap<u64, u32>,
+    relay_slot_clients: HashMap<u32, u64>, // slot_id -> client peer_id
+    relay_clients: HashMap<u64, u32>,      // client peer_id -> slot_id
+    next_slot_id: u32,
     policy: Policy,
     gossip_enabled: bool,
     addr_book: HashMap<SocketAddr, u64>, // last_seen
@@ -471,7 +513,7 @@ pub struct PeerInfo {
 }
 
 impl P2pEngine {
-    pub fn new(path: &Path, genesis: BlockHeader) -> Result<Self, P2pError> {
+    pub fn new(path: &Path, genesis: BlockHeader, relay: RelayConfig) -> Result<Self, P2pError> {
         let store = HeaderStore::open(path, genesis)?;
         let addr_tree = store
             .db()
@@ -483,6 +525,12 @@ impl P2pEngine {
             peers: HashMap::new(),
             outbound: HashMap::new(),
             next_peer_id: 0,
+            relay_config: relay,
+            relay_slots: HashMap::new(),
+            relay_slot_by_peer: HashMap::new(),
+            relay_slot_clients: HashMap::new(),
+            relay_clients: HashMap::new(),
+            next_slot_id: 0,
             policy: Policy::default(),
             gossip_enabled: true,
             addr_book,
@@ -503,6 +551,7 @@ impl P2pEngine {
         path: &Path,
         genesis: BlockHeader,
         policy: Policy,
+        relay: RelayConfig,
     ) -> Result<Self, P2pError> {
         let store = HeaderStore::open(path, genesis)?;
         let addr_tree = store
@@ -515,6 +564,12 @@ impl P2pEngine {
             peers: HashMap::new(),
             outbound: HashMap::new(),
             next_peer_id: 0,
+            relay_config: relay,
+            relay_slots: HashMap::new(),
+            relay_slot_by_peer: HashMap::new(),
+            relay_slot_clients: HashMap::new(),
+            relay_clients: HashMap::new(),
+            next_slot_id: 0,
             policy,
             gossip_enabled: true,
             addr_book,
@@ -745,7 +800,10 @@ impl P2pEngine {
         if out.len() > MAX_ADDR_TABLE {
             let mut items: Vec<(SocketAddr, u64)> = out.iter().map(|(a, t)| (*a, *t)).collect();
             items.sort_by_key(|(_, t)| *t);
-            for (addr, _) in items.into_iter().take(out.len().saturating_sub(MAX_ADDR_TABLE)) {
+            for (addr, _) in items
+                .into_iter()
+                .take(out.len().saturating_sub(MAX_ADDR_TABLE))
+            {
                 out.remove(&addr);
                 let _ = tree.remove(addr.to_string().as_bytes());
             }
@@ -759,6 +817,20 @@ impl P2pEngine {
             .filter(|p| !p.disconnected)
             .filter_map(|p| p.addr)
             .collect()
+    }
+
+    fn cleanup_peer(&mut self, peer_id: u64) {
+        if let Some(slot) = self.relay_slot_by_peer.remove(&peer_id) {
+            self.relay_slots.remove(&slot);
+            if let Some(client) = self.relay_slot_clients.remove(&slot) {
+                self.relay_clients.remove(&client);
+            }
+        }
+        if let Some(slot) = self.relay_clients.remove(&peer_id) {
+            self.relay_slot_clients.remove(&slot);
+        }
+        self.outbound.remove(&peer_id);
+        self.peers.remove(&peer_id);
     }
 
     pub fn next_dial_targets(&mut self, max: usize, min_interval: Duration) -> Vec<SocketAddr> {
@@ -780,16 +852,14 @@ impl P2pEngine {
             }
             if let Some(ts) = self.dial_history.get(&addr) {
                 let failures = self.dial_failures.get(&addr).copied().unwrap_or(0);
-                let backoff = Duration::from_secs(
-                    failures.saturating_mul(DIAL_BACKOFF_SECS as u32) as u64,
-                );
+                let backoff =
+                    Duration::from_secs(failures.saturating_mul(DIAL_BACKOFF_SECS as u32) as u64);
                 let wait = min_interval + backoff;
                 if now.saturating_duration_since(*ts) < wait {
                     continue;
                 }
                 if failures >= MAX_ADDR_FAILS {
-                    let cooloff =
-                        Duration::from_secs(DIAL_BACKOFF_SECS * failures as u64);
+                    let cooloff = Duration::from_secs(DIAL_BACKOFF_SECS * failures as u64);
                     if now.saturating_duration_since(*ts) < cooloff {
                         continue;
                     }
@@ -954,22 +1024,34 @@ impl P2pEngine {
 
         let out_msgs: Result<Vec<(u64, Message)>, P2pError> = match msg {
             Message::Version(_) => {
-                let peer = self.peers.entry(peer_id).or_default();
-                let first_version = !peer.version_seen;
-                peer.version_seen = true;
-                if let Message::Version(v) = &msg {
-                    peer.height = v.height;
-                    if v.listen_port != 0 {
-                        if let Some(addr) = peer.addr {
-                            let mut announced = addr;
-                            announced.set_port(v.listen_port);
-                            let now = std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_secs();
-                            self.insert_addr(announced, now);
+                let mut announced: Option<SocketAddr> = None;
+                let mut peer_requested_relay = false;
+                let first_version = {
+                    let peer = self.peers.entry(peer_id).or_default();
+                    let first = !peer.version_seen;
+                    peer.version_seen = true;
+                    if let Message::Version(v) = &msg {
+                        peer.height = v.height;
+                        peer.node_id = Some(v.node_id);
+                        peer.request_relay = v.request_relay;
+                        peer.provide_relay = v.provide_relay;
+                        peer_requested_relay = v.request_relay;
+                        if v.listen_port != 0 {
+                            if let Some(addr) = peer.addr {
+                                let mut a = addr;
+                                a.set_port(v.listen_port);
+                                announced = Some(a);
+                            }
                         }
                     }
+                    first
+                };
+                if let Some(addr) = announced {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    self.insert_addr(addr, now);
                 }
                 let mut out = vec![(peer_id, Message::Verack)];
                 out.push((
@@ -977,8 +1059,23 @@ impl P2pEngine {
                     Message::Version(Version {
                         height: self.store.best_entry().height,
                         listen_port: self.advertised_port.unwrap_or(0),
+                        node_id: self.relay_config.node_id,
+                        request_relay: self.relay_config.request_relay,
+                        provide_relay: self.relay_config.provide_relay
+                            && self.relay_config.relay_cap > 0,
                     }),
                 ));
+                if self.relay_config.provide_relay
+                    && self.relay_config.relay_cap > 0
+                    && peer_requested_relay
+                    && self.relay_slots.len() < self.relay_config.relay_cap as usize
+                {
+                    let slot_id = self.next_slot_id;
+                    self.next_slot_id = self.next_slot_id.wrapping_add(1);
+                    self.relay_slots.insert(slot_id, peer_id);
+                    self.relay_slot_by_peer.insert(peer_id, slot_id);
+                    out.push((peer_id, Message::RelaySlot { slot_id }));
+                }
                 if first_version {
                     let locator = self.store.locator();
                     out.push((
@@ -1188,6 +1285,63 @@ impl P2pEngine {
                 );
                 Ok(out)
             }
+            Message::RelaySlot { slot_id } => {
+                let peer = self.peers.entry(peer_id).or_default();
+                peer.relay_slot = Some(slot_id);
+                Ok(Vec::new())
+            }
+            Message::RelayConnect { slot_id } => {
+                if !self.relay_config.provide_relay || self.relay_config.relay_cap == 0 {
+                    return Ok(Vec::new());
+                }
+                if let Some(&owner) = self.relay_slots.get(&slot_id) {
+                    self.relay_clients.insert(peer_id, slot_id);
+                    self.relay_slot_clients.insert(slot_id, peer_id);
+                    return Ok(vec![(owner, Message::RelayConnect { slot_id })]);
+                }
+                Ok(Vec::new())
+            }
+            Message::RelayData { slot_id, payload } => {
+                if self.relay_config.provide_relay && self.relay_config.relay_cap > 0 {
+                    if let Some(&owner) = self.relay_slots.get(&slot_id) {
+                        if owner == peer_id {
+                            if let Some(&client) = self.relay_slot_clients.get(&slot_id) {
+                                return Ok(vec![(client, Message::RelayData { slot_id, payload })]);
+                            }
+                            return Ok(Vec::new());
+                        }
+                    }
+                    if let Some(&slot) = self.relay_clients.get(&peer_id) {
+                        if slot == slot_id {
+                            if let Some(&owner) = self.relay_slots.get(&slot_id) {
+                                return Ok(vec![(owner, Message::RelayData { slot_id, payload })]);
+                            }
+                        }
+                    }
+                    return Err(P2pError::Policy("unknown relay slot".into()));
+                }
+                let inner =
+                    Message::try_from_slice(&payload).map_err(|e| P2pError::Io(e.to_string()))?;
+                if matches!(inner, Message::RelayData { .. }) {
+                    return Err(P2pError::Policy("nested relay payload".into()));
+                }
+                let responses = self.handle_message(peer_id, inner)?;
+                let mut wrapped = Vec::new();
+                for (pid, m) in responses {
+                    if pid != peer_id {
+                        continue;
+                    }
+                    let bytes = to_vec(&m).map_err(|e| P2pError::Io(format!("relay wrap: {e}")))?;
+                    wrapped.push((
+                        peer_id,
+                        Message::RelayData {
+                            slot_id,
+                            payload: bytes,
+                        },
+                    ));
+                }
+                Ok(wrapped)
+            }
         };
         let mut out = out_msgs?;
         out.extend(proactive);
@@ -1253,10 +1407,10 @@ impl P2pEngine {
                         // Periodic global getaddr even when target peers is met, to refresh tables.
                         if eng.gossip_enabled {
                             let now = Instant::now();
-                            let due = eng
-                                .last_global_getaddr
-                                .map_or(true, |t| now.saturating_duration_since(t)
-                                    >= Duration::from_secs(GLOBAL_GETADDR_SECS));
+                            let due = eng.last_global_getaddr.map_or(true, |t| {
+                                now.saturating_duration_since(t)
+                                    >= Duration::from_secs(GLOBAL_GETADDR_SECS)
+                            });
                             if due {
                                 let mut sent = 0usize;
                                 for (pid, _ps) in eng
@@ -1301,7 +1455,10 @@ impl P2pEngine {
                 // Do not ingest the ephemeral inbound socket into the addr book; we only
                 // gossip stable listen ports that peers advertise via Version.
                 guard.outbound.insert(peer_id, tx_out.clone());
-                let ps = guard.peers.entry(peer_id).or_insert_with(PeerState::default);
+                let ps = guard
+                    .peers
+                    .entry(peer_id)
+                    .or_insert_with(PeerState::default);
                 ps.addr = peer_addr;
                 ps.inbound = true;
                 ps.outbound = false;
@@ -1338,8 +1495,7 @@ impl P2pEngine {
                         }
                     }
                     let mut guard = eng.lock().expect("engine");
-                    guard.outbound.remove(&peer_id);
-                    guard.peers.remove(&peer_id);
+                    guard.cleanup_peer(peer_id);
                 });
             }
         })
@@ -1363,7 +1519,7 @@ impl P2pEngine {
         stream
             .set_read_timeout(None)
             .map_err(|e| P2pError::Io(e.to_string()))?;
-        let (peer_id, locator, height, listen_port) = {
+        let (peer_id, locator, height, listen_port, relay_cfg) = {
             let mut eng = engine.lock().expect("engine");
             if eng.gossip_enabled && P2pEngine::valid_gossip_addr(&addr) {
                 let now = std::time::SystemTime::now()
@@ -1377,6 +1533,7 @@ impl P2pEngine {
                 eng.store.locator(),
                 eng.best_entry().height,
                 eng.advertised_port.unwrap_or(0),
+                eng.relay_config,
             )
         };
 
@@ -1385,6 +1542,9 @@ impl P2pEngine {
             &Message::Version(Version {
                 height,
                 listen_port,
+                node_id: relay_cfg.node_id,
+                request_relay: relay_cfg.request_relay,
+                provide_relay: relay_cfg.provide_relay && relay_cfg.relay_cap > 0,
             }),
         )?;
         P2pEngine::write_message(&mut stream, &Message::Verack)?;
@@ -1439,8 +1599,7 @@ impl P2pEngine {
                 }
             }
             let mut eng = eng.lock().expect("engine");
-            eng.outbound.remove(&peer_id);
-            eng.peers.remove(&peer_id);
+            eng.cleanup_peer(peer_id);
         });
         Ok(handle)
     }
@@ -1475,6 +1634,10 @@ mod tests {
             bits: 0x207f_ffff,
             nonce: 7,
         }
+    }
+
+    fn relay_disabled() -> RelayConfig {
+        RelayConfig::disabled(Hash32::zero())
     }
 
     fn dummy_block(header: BlockHeader) -> Block {
@@ -1515,7 +1678,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("db");
         let genesis = genesis_header();
-        let mut p2p = P2pEngine::new(&path, genesis.clone()).unwrap();
+        let mut p2p = P2pEngine::new(&path, genesis.clone(), relay_disabled()).unwrap();
 
         let child_easy = make_child(&genesis, 0x207f_ffff, genesis.timestamp + 1);
         let child_hard = make_child(&genesis, 0x1e00_ffff, genesis.timestamp + 2);
@@ -1535,7 +1698,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("db");
         let genesis = genesis_header();
-        let mut p2p = P2pEngine::new(&path, genesis.clone()).unwrap();
+        let mut p2p = P2pEngine::new(&path, genesis.clone(), relay_disabled()).unwrap();
 
         // Bad MTP: same timestamp as parent.
         let bad = make_child(&genesis, genesis.bits, genesis.timestamp);
@@ -1551,13 +1714,13 @@ mod tests {
         let path = dir.path().join("db");
         let genesis = genesis_header();
         {
-            let mut p2p = P2pEngine::new(&path, genesis.clone()).unwrap();
+            let mut p2p = P2pEngine::new(&path, genesis.clone(), relay_disabled()).unwrap();
             let h1 = make_child(&genesis, genesis.bits, genesis.timestamp + 1);
             p2p.handle_message(1, Message::Headers(vec![h1.clone()]))
                 .unwrap();
             assert_eq!(p2p.best_entry().height, 1);
         }
-        let p2p = P2pEngine::new(&path, genesis.clone()).unwrap();
+        let p2p = P2pEngine::new(&path, genesis.clone(), relay_disabled()).unwrap();
         assert_eq!(p2p.best_entry().height, 1);
     }
 
@@ -1567,10 +1730,10 @@ mod tests {
         let dir_b = tempdir().unwrap();
         let genesis = genesis_header();
         let eng_a = Arc::new(Mutex::new(
-            P2pEngine::new(&dir_a.path().join("db"), genesis.clone()).unwrap(),
+            P2pEngine::new(&dir_a.path().join("db"), genesis.clone(), relay_disabled()).unwrap(),
         ));
         let eng_b = Arc::new(Mutex::new(
-            P2pEngine::new(&dir_b.path().join("db"), genesis.clone()).unwrap(),
+            P2pEngine::new(&dir_b.path().join("db"), genesis.clone(), relay_disabled()).unwrap(),
         ));
 
         // Prepare a block on node A.
@@ -1598,7 +1761,17 @@ mod tests {
             .unwrap();
 
         let locator = { eng_b.lock().unwrap().store.locator() };
-        P2pEngine::write_message(&mut client, &Message::Version(Version { height: 0 })).unwrap();
+        P2pEngine::write_message(
+            &mut client,
+            &Message::Version(Version {
+                height: 0,
+                listen_port: 0,
+                node_id: Hash32::zero(),
+                request_relay: false,
+                provide_relay: false,
+            }),
+        )
+        .unwrap();
         P2pEngine::write_message(&mut client, &Message::Verack).unwrap();
         P2pEngine::write_message(
             &mut client,
@@ -1647,7 +1820,8 @@ mod tests {
             max_reorg_depth: Some(0),
             ban_threshold: 1,
         };
-        let mut p2p = P2pEngine::with_policy(&path, genesis.clone(), policy).unwrap();
+        let mut p2p =
+            P2pEngine::with_policy(&path, genesis.clone(), policy, relay_disabled()).unwrap();
 
         let h1 = make_child(&genesis, genesis.bits, genesis.timestamp + 1);
         let h2 = make_child(&h1, genesis.bits, h1.timestamp + 1);
@@ -1667,7 +1841,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("db");
         let genesis = genesis_header();
-        let mut p2p = P2pEngine::new(&path, genesis).unwrap();
+        let mut p2p = P2pEngine::new(&path, genesis, relay_disabled()).unwrap();
 
         // Two peers connected.
         p2p.peers.insert(1, PeerState::default());
@@ -1732,7 +1906,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("db");
         let genesis = genesis_header();
-        let mut p2p = P2pEngine::new(&path, genesis).unwrap();
+        let mut p2p = P2pEngine::new(&path, genesis, relay_disabled()).unwrap();
         p2p.peers.insert(1, PeerState::default());
         p2p.set_has_tx(|_| false);
         let h = Hash32::from([1u8; 32]);
@@ -1751,8 +1925,8 @@ mod tests {
         let a_path = dir.path().join("a.db");
         let b_path = dir.path().join("b.db");
         let genesis = genesis_header();
-        let mut a = P2pEngine::new(&a_path, genesis.clone()).unwrap();
-        let mut b = P2pEngine::new(&b_path, genesis).unwrap();
+        let mut a = P2pEngine::new(&a_path, genesis.clone(), relay_disabled()).unwrap();
+        let mut b = P2pEngine::new(&b_path, genesis, relay_disabled()).unwrap();
 
         // Wire peers and outbound channels manually.
         let (tx_ab, rx_ab) = mpsc::channel::<Message>();
@@ -1844,7 +2018,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("db");
         let genesis = genesis_header();
-        let mut p2p = P2pEngine::new(&path, genesis.clone()).unwrap();
+        let mut p2p = P2pEngine::new(&path, genesis.clone(), relay_disabled()).unwrap();
         let child = make_child(&genesis, genesis.bits, genesis.timestamp + 1);
         let headers = vec![child; 65]; // MAX_HEADERS is 64
         let err = p2p
@@ -1858,7 +2032,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("db");
         let genesis = genesis_header();
-        let mut p2p = P2pEngine::new(&path, genesis).unwrap();
+        let mut p2p = P2pEngine::new(&path, genesis, relay_disabled()).unwrap();
         let hashes = vec![Hash32::zero(); 1_100]; // > MAX_INV_TX
         let err = p2p
             .handle_message(1, Message::InvTx(hashes))
