@@ -60,6 +60,9 @@ struct Config {
     /// Attempt NAT-PMP/UPnP port mapping for the listen port (opt-in).
     #[arg(long = "nat")]
     nat: bool,
+    /// Optional node role shortcut: miner | follower | seed
+    #[arg(long = "role")]
+    role: Option<String>,
     /// Enable addr gossip (optional; default off).
     #[arg(long = "gossip")]
     gossip: bool,
@@ -91,6 +94,12 @@ fn main() {
 
     let cfg = resolve_config(Config::parse());
     println!("Mining rewards sent to: {}", cfg.miner_addr_b58);
+    if cfg.listen.ip().is_loopback() {
+        eprintln!(
+            "warn: inbound disabled (listen on {}). Use a public IP/port forward for peers.",
+            cfg.listen
+        );
+    }
     if cfg.nat_enabled {
         maybe_open_nat(&cfg.listen);
     }
@@ -779,7 +788,16 @@ fn resolve_config(cli: Config) -> ResolvedConfig {
     };
 
     // mining opt-in: --mine or NULLA_MINE; disabled if --no-mine or NULLA_NO_MINE
+    // Role shortcuts: seed/follower => no mining, miner => mining unless explicitly disabled.
+    let role = cli.role.as_deref().map(|r| r.to_ascii_lowercase());
     let mut mining_enabled = cli.mine || env::var("NULLA_MINE").is_ok();
+    if let Some(r) = role.as_deref() {
+        match r {
+            "seed" | "follower" => mining_enabled = false,
+            "miner" => mining_enabled = true,
+            other => eprintln!("warn: unknown role '{other}', ignoring"),
+        }
+    }
     if cli.no_mine || env::var("NULLA_NO_MINE").is_ok() {
         mining_enabled = false;
     }

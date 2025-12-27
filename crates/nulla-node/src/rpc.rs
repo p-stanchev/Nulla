@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 
 use crate::{decode_address, submit_tx_to_node};
 use crate::mempool::Mempool;
-use nulla_p2p::net::P2pEngine;
+use nulla_p2p::net::{P2pEngine, PeerInfo};
 use crate::ChainStore;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -142,7 +142,24 @@ fn handle_request(
             json!({
                 "ok": true,
                 "peers": net.peer_count(),
+                "addr_table": net.addr_table_len(),
             })
+        }
+        "get_peers" => {
+            let net = p2p.lock().expect("p2p");
+            let list: Vec<Value> = net
+                .peers_snapshot()
+                .into_iter()
+                .map(|p: PeerInfo| {
+                    json!({
+                        "addr": p.addr.to_string(),
+                        "inbound": p.inbound,
+                        "outbound": p.outbound,
+                        "height": p.height,
+                    })
+                })
+                .collect();
+            json!({"ok": true, "peers": list, "addr_table": net.addr_table_len()})
         }
         "get_utxos" => {
             let pk_bytes = match parse_pubkey_hash(&v) {

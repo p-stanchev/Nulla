@@ -18,6 +18,7 @@ use nulla_core::{
 use num_bigint::BigUint;
 use thiserror::Error;
 use std::net::IpAddr;
+use serde::Serialize;
 
 const TREE_HEADERS: &str = "headers";
 const TREE_META: &str = "meta";
@@ -454,6 +455,14 @@ pub struct P2pEngine {
     addr_tree: sled::Tree,
 }
 
+#[derive(Clone, Copy, serde::Serialize)]
+pub struct PeerInfo {
+    pub addr: SocketAddr,
+    pub inbound: bool,
+    pub outbound: bool,
+    pub height: u64,
+}
+
 impl P2pEngine {
     pub fn new(path: &Path, genesis: BlockHeader) -> Result<Self, P2pError> {
         let store = HeaderStore::open(path, genesis)?;
@@ -539,10 +548,33 @@ impl P2pEngine {
         self.peers.values().filter(|p| !p.disconnected).count()
     }
 
+    pub fn peers_snapshot(&self) -> Vec<PeerInfo> {
+        let mut out = Vec::new();
+        for (id, peer) in self.peers.iter() {
+            if peer.disconnected {
+                continue;
+            }
+            if let Some(addr) = peer.addr {
+                let outbound = self.outbound.contains_key(id);
+                out.push(PeerInfo {
+                    addr,
+                    inbound: !outbound,
+                    outbound,
+                    height: peer.height,
+                });
+            }
+        }
+        out
+    }
+
     pub fn next_peer_id(&mut self) -> u64 {
         let id = self.next_peer_id;
         self.next_peer_id = self.next_peer_id.wrapping_add(1);
         id
+    }
+
+    pub fn addr_table_len(&self) -> usize {
+        self.addr_book.len()
     }
 
     pub fn missing_blocks_on_best(&self, max: usize) -> Vec<Hash32> {

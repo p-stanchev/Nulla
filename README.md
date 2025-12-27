@@ -58,13 +58,23 @@ Each crate owns a single responsibility; there are no circular dependencies.
 ## Getting Started (beginner friendly)
 
 Node (must be running for wallet operations)
+- Ports: P2P listen defaults to `0.0.0.0:27444` (open/forward this for reachability). RPC defaults to `127.0.0.1:27445` (keep local).
+- Roles: use `--role seed|follower|miner` to shortcut mining on/off; `--mine/--no-mine` still override.
+- Seed node (no mining, public port):
+  ```bash
+  RUST_LOG=info NULLA_RPC_LISTEN=127.0.0.1:27445 \
+  cargo run -p nulla-node -- \
+    --role seed \
+    --listen 0.0.0.0:27444 \
+    --gossip
+  ```
 - Miner example (Linux/macOS shell):
   ```bash
   RUST_LOG=info NULLA_RPC_LISTEN=127.0.0.1:27447 \
   cargo run -p nulla-node -- \
     --mine \
     --miner-address <Base58 addr> \
-    --listen 0.0.0.0:27446 \
+    --listen 0.0.0.0:27444 \
     --db nulla.chain.miner.db \
     --gossip \  # default on; disable with --no-gossip/NULLA_NO_GOSSIP
     --peers 45.155.53.102:27444,45.155.53.112:27444,45.155.53.126:27444
@@ -76,7 +86,7 @@ Node (must be running for wallet operations)
   cargo run -p nulla-node -- `
     --mine `
     --miner-address <Base58 addr> `
-    --listen 0.0.0.0:27446 `
+    --listen 0.0.0.0:27444 `
     --db nulla.chain.miner.db `
     --gossip `  # default on; disable with --no-gossip/NULLA_NO_GOSSIP
     --peers 45.155.53.102:27444,45.155.53.112:27444,45.155.53.126:27444
