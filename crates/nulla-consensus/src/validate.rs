@@ -12,7 +12,9 @@ use nulla_core::{Block, BlockHeader, Hash32, PROTOCOL_VERSION};
 #[allow(unused_imports)]
 use time::OffsetDateTime;
 
-const MAX_FUTURE_DRIFT_SECS: u64 = 2 * 60 * 60;
+// Allow a wider skew so slightly off clocks don't cause headers to be rejected.
+// NOTE: Consensus-sensitive; adjust with caution.
+const MAX_FUTURE_DRIFT_SECS: u64 = 24 * 60 * 60;
 const MTP_WINDOW: usize = 11;
 
 /// Validate basic header invariants plus timestamp rules (MTP + drift).
