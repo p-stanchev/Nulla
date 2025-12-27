@@ -1287,7 +1287,11 @@ impl P2pEngine {
             }
             Message::RelaySlot { slot_id } => {
                 let peer = self.peers.entry(peer_id).or_default();
+                let first_slot = peer.relay_slot.is_none();
                 peer.relay_slot = Some(slot_id);
+                if first_slot {
+                    return Ok(vec![(peer_id, Message::RelayConnect { slot_id })]);
+                }
                 Ok(Vec::new())
             }
             Message::RelayConnect { slot_id } => {
@@ -1295,6 +1299,10 @@ impl P2pEngine {
                     return Ok(Vec::new());
                 }
                 if let Some(&owner) = self.relay_slots.get(&slot_id) {
+                    if owner == peer_id {
+                        // Slot owner acknowledging receipt; avoid echoing to prevent loops.
+                        return Ok(Vec::new());
+                    }
                     self.relay_clients.insert(peer_id, slot_id);
                     self.relay_slot_clients.insert(slot_id, peer_id);
                     return Ok(vec![(owner, Message::RelayConnect { slot_id })]);
@@ -1680,6 +1688,59 @@ mod tests {
             bits,
             nonce: 0,
         }
+    }
+
+    #[test]
+    fn relay_slot_triggers_connect() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("db");
+        let genesis = genesis_header();
+        let relay_cfg = RelayConfig {
+            node_id: Hash32::zero(),
+            request_relay: true,
+            provide_relay: false,
+            relay_cap: 0,
+        };
+        let mut p2p = P2pEngine::new(&path, genesis, relay_cfg).unwrap();
+
+        let response = p2p
+            .handle_message(1, Message::RelaySlot { slot_id: 7 })
+            .unwrap();
+        assert!(response.iter().any(|(pid, msg)| {
+            *pid == 1
+                && matches!(
+                    msg,
+                    Message::RelayConnect { slot_id } if *slot_id == 7
+                )
+        }));
+
+        // Ignore duplicate slot notices to avoid spamming reconnects.
+        let repeat = p2p
+            .handle_message(1, Message::RelaySlot { slot_id: 7 })
+            .unwrap();
+        assert!(repeat.is_empty());
+    }
+
+    #[test]
+    fn relay_connect_from_owner_is_ignored() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("db");
+        let genesis = genesis_header();
+        // Relay-capable node that issued a slot to peer 1.
+        let relay_cfg = RelayConfig {
+            node_id: Hash32::zero(),
+            request_relay: false,
+            provide_relay: true,
+            relay_cap: 1,
+        };
+        let mut p2p = P2pEngine::new(&path, genesis, relay_cfg).unwrap();
+        p2p.relay_slots.insert(9, 1);
+
+        // The slot owner sending RelayConnect should not trigger an echo loop.
+        let response = p2p
+            .handle_message(1, Message::RelayConnect { slot_id: 9 })
+            .unwrap();
+        assert!(response.is_empty());
     }
 
     #[test]
