@@ -1,7 +1,9 @@
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use hex::FromHex;
 use nulla_core::Transaction;
@@ -13,6 +15,62 @@ use nulla_p2p::net::{P2pEngine, PeerInfo};
 use crate::ChainStore;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
+
+// RPC rate limiting (DoS protection)
+const MAX_RPC_REQUESTS_PER_SEC: usize = 10;
+const RATE_LIMIT_WINDOW_SECS: u64 = 1;
+
+struct RateLimiter {
+    requests: Arc<Mutex<HashMap<SocketAddr, Vec<Instant>>>>,
+}
+
+impl RateLimiter {
+    fn new() -> Self {
+        Self {
+            requests: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    fn check_rate_limit(&self, addr: SocketAddr) -> bool {
+        let mut requests = self.requests.lock().unwrap_or_else(|poisoned| {
+            eprintln!("WARN: rate limiter mutex poisoned, recovering");
+            poisoned.into_inner()
+        });
+
+        let now = Instant::now();
+        let window = Duration::from_secs(RATE_LIMIT_WINDOW_SECS);
+
+        // Get or create entry for this address
+        let times = requests.entry(addr).or_insert_with(Vec::new);
+
+        // Remove expired entries
+        times.retain(|&t| now.duration_since(t) < window);
+
+        // Check if rate limit exceeded
+        if times.len() >= MAX_RPC_REQUESTS_PER_SEC {
+            return false;
+        }
+
+        // Record this request
+        times.push(now);
+        true
+    }
+
+    fn cleanup_old_entries(&self) {
+        let mut requests = self.requests.lock().unwrap_or_else(|poisoned| {
+            eprintln!("WARN: rate limiter mutex poisoned, recovering");
+            poisoned.into_inner()
+        });
+
+        let now = Instant::now();
+        let window = Duration::from_secs(RATE_LIMIT_WINDOW_SECS * 10); // Keep 10x window for cleanup
+
+        requests.retain(|_, times| {
+            times.retain(|&t| now.duration_since(t) < window);
+            !times.is_empty()
+        });
+    }
+}
 
 fn parse_pubkey_hash(v: &Value) -> Result<[u8; 20], String> {
     if let Some(addr) = v.get("address").and_then(|a| a.as_str()) {
@@ -34,6 +92,19 @@ pub fn serve_rpc(
     mining_block_reason: Arc<Mutex<Option<String>>>,
 ) -> std::io::Result<()> {
     let listener = TcpListener::bind(addr)?;
+    let rate_limiter = Arc::new(RateLimiter::new());
+
+    // Spawn cleanup thread for rate limiter
+    {
+        let limiter = Arc::clone(&rate_limiter);
+        thread::spawn(move || {
+            loop {
+                thread::sleep(Duration::from_secs(60));
+                limiter.cleanup_old_entries();
+            }
+        });
+    }
+
     thread::spawn(move || {
         for stream in listener.incoming() {
             if let Ok(stream) = stream {
@@ -43,6 +114,7 @@ pub fn serve_rpc(
                 let mining_ready = Arc::clone(&mining_ready);
                 let mining_block_reason = Arc::clone(&mining_block_reason);
                 let auth_token = auth_token.clone();
+                let limiter = Arc::clone(&rate_limiter);
                 thread::spawn(move || {
                     handle_client(
                         stream,
@@ -52,6 +124,7 @@ pub fn serve_rpc(
                         p2p,
                         mining_ready,
                         mining_block_reason,
+                        limiter,
                     )
                 });
             }
@@ -68,13 +141,33 @@ fn handle_client(
     p2p: Arc<Mutex<P2pEngine>>,
     mining_ready: Arc<AtomicBool>,
     mining_block_reason: Arc<Mutex<Option<String>>>,
+    rate_limiter: Arc<RateLimiter>,
 ) {
+    let peer_addr = match stream.peer_addr() {
+        Ok(addr) => addr,
+        Err(_) => {
+            eprintln!("WARN: failed to get peer address, closing connection");
+            return;
+        }
+    };
+
     let mut reader = BufReader::new(stream.try_clone().unwrap());
     let mut line = String::new();
     while let Ok(n) = reader.read_line(&mut line) {
         if n == 0 {
             break;
         }
+
+        // Check rate limit
+        if !rate_limiter.check_rate_limit(peer_addr) {
+            let resp = json!({"ok": false, "error": "rate limit exceeded"});
+            let mut stream = stream.try_clone().unwrap();
+            let _ = stream.write_all(resp.to_string().as_bytes());
+            let _ = stream.write_all(b"\n");
+            line.clear();
+            continue;
+        }
+
         let resp = match serde_json::from_str::<Value>(&line) {
             Ok(v) => handle_request(
                 v,
@@ -117,10 +210,16 @@ fn handle_request(
     match method {
         "ping" => json!({"ok": true}),
         "get_chain_info" => {
-            let chain = chain.lock().expect("chain");
+            let chain = chain.lock().unwrap_or_else(|poisoned| {
+                eprintln!("WARN: chain mutex poisoned, recovering");
+                poisoned.into_inner()
+            });
             let best = chain.best_entry();
             let peer_count = {
-                let net = p2p.lock().expect("p2p");
+                let net = p2p.lock().unwrap_or_else(|poisoned| {
+                    eprintln!("WARN: p2p mutex poisoned, recovering");
+                    poisoned.into_inner()
+                });
                 net.peer_count()
             };
             let ready = mining_ready.load(Ordering::Relaxed);
@@ -138,7 +237,10 @@ fn handle_request(
             })
         }
         "get_peer_stats" => {
-            let net = p2p.lock().expect("p2p");
+            let net = p2p.lock().unwrap_or_else(|poisoned| {
+                eprintln!("WARN: p2p mutex poisoned, recovering");
+                poisoned.into_inner()
+            });
             json!({
                 "ok": true,
                 "peers": net.peer_count(),
@@ -146,7 +248,10 @@ fn handle_request(
             })
         }
         "get_peers" => {
-            let net = p2p.lock().expect("p2p");
+            let net = p2p.lock().unwrap_or_else(|poisoned| {
+                eprintln!("WARN: p2p mutex poisoned, recovering");
+                poisoned.into_inner()
+            });
             let list: Vec<Value> = net
                 .peers_snapshot()
                 .into_iter()
@@ -166,7 +271,10 @@ fn handle_request(
                 Ok(b) => b,
                 Err(e) => return json!({"ok": false, "error": e}),
             };
-            let chain = chain.lock().expect("chain");
+            let chain = chain.lock().unwrap_or_else(|poisoned| {
+                eprintln!("WARN: chain mutex poisoned, recovering");
+                poisoned.into_inner()
+            });
             match chain.utxos_for_pubkey_hash(pk_bytes) {
                 Ok(list) => {
                     let utxos: Vec<Value> = list
@@ -190,7 +298,10 @@ fn handle_request(
                 Ok(b) => b,
                 Err(e) => return json!({"ok": false, "error": e}),
             };
-            let chain = chain.lock().expect("chain");
+            let chain = chain.lock().unwrap_or_else(|poisoned| {
+                eprintln!("WARN: chain mutex poisoned, recovering");
+                poisoned.into_inner()
+            });
             match chain.utxos_for_pubkey_hash(pk_bytes) {
                 Ok(list) => {
                     let bal: u64 = list.iter().map(|(_, rec)| rec.value).sum();

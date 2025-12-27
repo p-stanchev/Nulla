@@ -7,7 +7,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use borsh::{BorshDeserialize, BorshSerialize, to_vec};
-use log::{debug, info};
+use log::{debug, info, warn};
 use nulla_consensus::{
     median_time_past, tip_is_better, validate_block_with_prev_bits, validate_header_with_prev_bits,
     work_from_bits,
@@ -1611,6 +1611,7 @@ impl P2pEngine {
         let mut stream = TcpStream::connect(addr).map_err(|e| {
             let mut eng = engine.lock().expect("engine");
             eng.record_dial_failure(addr);
+            warn!("p2p: connect to {} failed: {}", addr, e);
             P2pError::Io(e.to_string())
         })?;
         stream
@@ -1681,7 +1682,10 @@ impl P2pEngine {
                 let msg = match P2pEngine::read_message(&mut stream) {
                     Ok(Some(m)) => m,
                     Ok(None) => break,
-                    Err(_) => break,
+                    Err(e) => {
+                        warn!("p2p: read error from {}: {}", addr, e);
+                        break;
+                    }
                 };
                 let send_result = {
                     let mut p2p = eng.lock().expect("engine");
@@ -1692,7 +1696,10 @@ impl P2pEngine {
                             }
                             Ok(())
                         }
-                        Err(e) => Err(e),
+                        Err(e) => {
+                            warn!("p2p: peer {} dropped due to {}", addr, e);
+                            Err(e)
+                        }
                     }
                 };
                 if send_result.is_err() {

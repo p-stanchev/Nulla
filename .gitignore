@@ -3,3 +3,4 @@
 /nulla.chain.db/
 /nulla.p2p.db/
 /*.db/
+.claude/settings.local.json

@@ -216,11 +216,12 @@ impl Wallet {
             .ok_or_else(|| anyhow!("address not found in wallet"))?;
         let rec = KeyRecord::try_from_slice(&bytes)?;
         let sk = decrypt_key(&rec.enc, password)?;
-        Ok(hex::encode(sk))
+        // Convert Zeroizing to hex, sk is zeroized on drop
+        Ok(hex::encode(&*sk))
     }
 
     pub fn import_key_hex(&self, key_hex: &str, password: &str) -> Result<String> {
-        let priv_bytes = Vec::from_hex(key_hex).map_err(|_| anyhow!("invalid hex"))?;
+        let priv_bytes = Zeroizing::new(Vec::from_hex(key_hex).map_err(|_| anyhow!("invalid hex"))?);
         if priv_bytes.len() != 32 {
             return Err(anyhow!("expected 32-byte secret key"));
         }
@@ -262,6 +263,7 @@ impl Wallet {
             h.update(&key.pubkey);
             h.finalize_xof().fill(&mut change_hash);
         }
+        // sk_bytes is zeroized when it goes out of scope
         self.consume_utxos(amount, fee, to_hash, change_hash, &sk)
     }
 
@@ -330,16 +332,21 @@ impl Wallet {
             memo: vec![],
         };
 
+        // Build pubkey hashes for all inputs (needed for sighash)
+        let pubkey = EncodedPoint::from(sk.verifying_key()).as_bytes().to_vec();
+        let mut h = Hasher::new();
+        h.update(&pubkey);
+        let mut pk_hash = [0u8; 20];
+        h.finalize_xof().fill(&mut pk_hash);
+
+        // Collect all pubkey hashes (in this wallet, all inputs use same key)
+        let pk_hashes: Vec<[u8; 20]> = vec![pk_hash; tx.transparent_inputs.len()];
+
         for idx in 0..tx.transparent_inputs.len() {
-            let pubkey = EncodedPoint::from(sk.verifying_key()).as_bytes().to_vec();
-            let mut h = Hasher::new();
-            h.update(&pubkey);
-            let mut pk_hash = [0u8; 20];
-            h.finalize_xof().fill(&mut pk_hash);
-            let sighash = tx_sighash(&tx, idx, pk_hash);
+            let sighash = tx_sighash(&tx, &pk_hashes);
             let sig: k256::ecdsa::Signature = sk.sign(&sighash);
             let inp = tx.transparent_inputs.get_mut(idx).expect("input exists");
-            inp.pubkey = pubkey;
+            inp.pubkey = pubkey.clone();
             inp.sig = sig.to_der().as_bytes().to_vec();
         }
 
@@ -347,7 +354,9 @@ impl Wallet {
     }
 }
 
-fn tx_sighash(tx: &Transaction, input_idx: usize, pk_hash: [u8; 20]) -> Vec<u8> {
+fn tx_sighash(tx: &Transaction, pk_hashes: &[[u8; 20]]) -> Vec<u8> {
+    // Sighash construction matches mempool validation (mempool.rs:283-304)
+    // All input pubkey_hashes are included in the sighash commitment.
     let mut data = Vec::new();
     data.extend_from_slice(CHAIN_ID.as_bytes());
     data.extend_from_slice(&tx.version.to_le_bytes());
@@ -355,11 +364,8 @@ fn tx_sighash(tx: &Transaction, input_idx: usize, pk_hash: [u8; 20]) -> Vec<u8> 
     for (i, inp) in tx.transparent_inputs.iter().enumerate() {
         data.extend_from_slice(inp.prevout.txid.as_bytes());
         data.extend_from_slice(&inp.prevout.vout.to_le_bytes());
-        if i == input_idx {
-            data.extend_from_slice(&pk_hash);
-        } else {
-            data.extend_from_slice(&[0u8; 20]);
-        }
+        // Include the pubkey_hash for this input (must match UTXO's pubkey_hash)
+        data.extend_from_slice(&pk_hashes[i]);
     }
     data.extend_from_slice(&(tx.transparent_outputs.len() as u64).to_le_bytes());
     for o in &tx.transparent_outputs {
@@ -393,7 +399,7 @@ fn encrypt_key(priv_bytes: &[u8], password: &str) -> Result<EncryptedKey> {
     })
 }
 
-fn decrypt_key(enc: &EncryptedKey, password: &str) -> Result<Vec<u8>> {
+fn decrypt_key(enc: &EncryptedKey, password: &str) -> Result<Zeroizing<Vec<u8>>> {
     let salt_str = std::str::from_utf8(&enc.salt)?;
     let salt = SaltString::from_b64(salt_str).map_err(|e| anyhow!(e.to_string()))?;
     let mut key = Zeroizing::new([0u8; 32]);
@@ -417,7 +423,8 @@ fn decrypt_key(enc: &EncryptedKey, password: &str) -> Result<Vec<u8>> {
     if plaintext.len() != 32 {
         return Err(anyhow!("invalid decrypted key length"));
     }
-    Ok(plaintext)
+    // Wrap in Zeroizing to ensure memory is cleared on drop
+    Ok(Zeroizing::new(plaintext))
 }
 
 pub fn encode_address(pubkey: &[u8]) -> String {
@@ -508,7 +515,7 @@ mod tests {
         let password = "passw0rd!";
         let enc = encrypt_key(&priv_key, password).expect("encrypt");
         let dec = decrypt_key(&enc, password).expect("decrypt");
-        assert_eq!(dec, priv_key);
+        assert_eq!(&*dec, &priv_key);
 
         let mut tampered = enc.clone();
         // Flip a bit in ciphertext to trigger auth failure.
