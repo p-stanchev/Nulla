@@ -99,6 +99,9 @@ struct Config {
     /// Miner payout address (Base58Check, prefix 0x35). Defaults to burn if not set.
     #[arg(long = "miner-address")]
     miner_address: Option<String>,
+    /// Allow mining even when local height is behind best peer (unsafe; testing only).
+    #[arg(long = "mine-while-behind")]
+    mine_while_behind: bool,
 }
 
 fn main() {
@@ -298,6 +301,7 @@ fn main() {
     let mut sync_stable_since: Option<std::time::Instant> = None;
     let mut last_block_reason: Option<String> = None;
     let mut last_gate_log = Instant::now();
+    let mut last_progress_log = Instant::now();
     loop {
         let best_height = { chain.lock().expect("chain lock").best_entry().height };
         let (peer_height, peer_count) = {
@@ -316,20 +320,35 @@ fn main() {
             sync_stable_since = None;
         }
 
-        // Mining readiness policy (non-consensus).
-        let mut block_reason: Option<String> = None;
-        if !cfg.mining_enabled {
-            block_reason = Some("mining disabled (no --mine)".into());
-        } else if peer_count < min_peers_for_mining {
-            block_reason = Some(format!(
+    // Mining readiness policy (non-consensus).
+    let mut block_reason: Option<String> = None;
+    if !cfg.mining_enabled {
+        block_reason = Some("mining disabled (no --mine)".into());
+    } else if peer_count < min_peers_for_mining {
+        block_reason = Some(format!(
                 "waiting for peers (have {}, need >= {})",
                 peer_count, min_peers_for_mining
             ));
-        } else if best_height < peer_height {
+        } else if best_height < peer_height && !cfg.mine_while_behind {
             block_reason = Some(format!(
                 "waiting for chain catch-up (need equal height; local {}, best peer {})",
                 best_height, peer_height
             ));
+            // Emit a simple progress indicator while catching up.
+            let now = Instant::now();
+            if now.saturating_duration_since(last_progress_log) >= Duration::from_secs(1) {
+                let pct = if peer_height == 0 {
+                    0.0
+                } else {
+                    (best_height as f64 / peer_height as f64).min(1.0) * 100.0
+                };
+                let bar = render_progress_bar(24, pct / 100.0);
+                println!(
+                    "Syncing chain: {} / {} ({:.1}%) {}",
+                    best_height, peer_height, pct, bar
+                );
+                last_progress_log = now;
+            }
         } else if let Some(since) = sync_stable_since {
             if since.elapsed().as_secs() < sync_stable_secs {
                 block_reason = Some(format!(
@@ -708,6 +727,22 @@ fn xor_hash(a: Hash32, b: Hash32) -> Hash32 {
     Hash32(out)
 }
 
+fn render_progress_bar(width: usize, fraction: f64) -> String {
+    let clamped = fraction.max(0.0).min(1.0);
+    let filled = (clamped * width as f64).round() as usize;
+    let mut out = String::with_capacity(width + 2);
+    out.push('[');
+    for i in 0..width {
+        if i < filled {
+            out.push('#');
+        } else {
+            out.push('.');
+        }
+    }
+    out.push(']');
+    out
+}
+
 /// Attempt to open the P2P listen port via UPnP/NAT-PMP (best-effort, opt-in).
 fn maybe_open_nat(listen: &SocketAddr) {
     let external_port = listen.port();
@@ -907,6 +942,7 @@ fn resolve_config(cli: Config) -> ResolvedConfig {
         miner_pubkey_hash,
         miner_addr_b58,
         mining_enabled,
+        mine_while_behind: cli.mine_while_behind || env::var("NULLA_MINE_WHILE_BEHIND").is_ok(),
         nat_enabled: cli.nat || env::var("NULLA_NAT").is_ok(),
         gossip_enabled,
         node_id: {
@@ -933,6 +969,7 @@ struct ResolvedConfig {
     miner_pubkey_hash: [u8; 20],
     miner_addr_b58: String,
     mining_enabled: bool,
+    mine_while_behind: bool,
     nat_enabled: bool,
     gossip_enabled: bool,
     node_id: Hash32,

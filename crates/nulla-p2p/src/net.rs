@@ -1792,9 +1792,9 @@ mod tests {
             prev,
             tx_merkle_root,
             commitment_root,
-            timestamp: 1_700_000_000,
+            timestamp: 1_767_225_600,
             bits: 0x207f_ffff,
-            nonce: 7,
+            nonce: 1,
         }
     }
 
