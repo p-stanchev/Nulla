@@ -18,7 +18,6 @@ use nulla_core::{
 use num_bigint::BigUint;
 use thiserror::Error;
 use std::net::IpAddr;
-use serde::Serialize;
 
 const TREE_HEADERS: &str = "headers";
 const TREE_META: &str = "meta";
@@ -37,6 +36,8 @@ const TARGET_PEERS_FOR_GOSSIP: usize = 8;
 const MAX_ADDR_FAILS: u32 = 3;
 // Back off between dial attempts to the same addr; kept small for faster mesh formation.
 const DIAL_BACKOFF_SECS: u64 = 15;
+const GLOBAL_GETADDR_SECS: u64 = 180;
+const GLOBAL_GETADDR_BATCH: usize = 2;
 
 #[derive(Debug, Error)]
 pub enum P2pError {
@@ -448,6 +449,7 @@ pub struct P2pEngine {
     dial_history: HashMap<SocketAddr, Instant>,
     dial_failures: HashMap<SocketAddr, u32>,
     static_peers: HashSet<SocketAddr>,
+    last_global_getaddr: Option<Instant>,
     on_block: Option<Arc<dyn Fn(&Block) -> Result<(), String> + Send + Sync>>,
     on_tx: Option<Arc<dyn Fn(&Transaction) -> Result<(), String> + Send + Sync>>,
     has_tx: Option<Arc<dyn Fn(&Hash32) -> bool + Send + Sync>>,
@@ -482,6 +484,7 @@ impl P2pEngine {
             dial_history: HashMap::new(),
             dial_failures: HashMap::new(),
             static_peers: HashSet::new(),
+            last_global_getaddr: None,
             on_block: None,
             on_tx: None,
             has_tx: None,
@@ -512,6 +515,7 @@ impl P2pEngine {
             dial_history: HashMap::new(),
             dial_failures: HashMap::new(),
             static_peers: HashSet::new(),
+            last_global_getaddr: None,
             on_block: None,
             on_tx: None,
             has_tx: None,
@@ -1201,7 +1205,7 @@ impl P2pEngine {
                 loop {
                     thread::sleep(Duration::from_secs(30));
                     let guard = eng_hb.lock().ok();
-                    if let Some(eng) = guard {
+                    if let Some(mut eng) = guard {
                         let connected = eng.peer_count();
                         let outbound = eng.outbound.len();
                         let inbound = connected.saturating_sub(outbound);
@@ -1210,6 +1214,40 @@ impl P2pEngine {
                             "net: peers connected={} outbound={} inbound={} addr_table={}",
                             connected, outbound, inbound, addr_table
                         );
+                        // Periodic global getaddr even when target peers is met, to refresh tables.
+                        if eng.gossip_enabled {
+                            let now = Instant::now();
+                            let due = eng
+                                .last_global_getaddr
+                                .map_or(true, |t| now.saturating_duration_since(t)
+                                    >= Duration::from_secs(GLOBAL_GETADDR_SECS));
+                            if due {
+                                let mut sent = 0usize;
+                                for (pid, _ps) in eng
+                                    .peers
+                                    .iter()
+                                    .filter(|(_, ps)| ps.verack_seen && !ps.disconnected)
+                                {
+                                    let _ = eng.send_to(
+                                        *pid,
+                                        Message::GetAddr {
+                                            max: MAX_ADDR_RESP as u16,
+                                        },
+                                    );
+                                    sent += 1;
+                                    if sent >= GLOBAL_GETADDR_BATCH {
+                                        break;
+                                    }
+                                }
+                                if sent > 0 {
+                                    debug!(
+                                        "gossip: periodic getaddr sent to {} peers (table={})",
+                                        sent, addr_table
+                                    );
+                                    eng.last_global_getaddr = Some(now);
+                                }
+                            }
+                        }
                     }
                 }
             });
@@ -1219,7 +1257,7 @@ impl P2pEngine {
                     info!("p2p: incoming connection from {}", pa);
                 }
                 let _ = stream.set_nodelay(true);
-                let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
                 let (tx_out, rx_out) = mpsc::channel::<Message>();
                 let mut guard = engine.lock().expect("engine");
                 let peer_id = guard.next_peer_id();
@@ -1297,7 +1335,7 @@ impl P2pEngine {
             .set_nodelay(true)
             .map_err(|e| P2pError::Io(e.to_string()))?;
         stream
-            .set_read_timeout(Some(Duration::from_secs(1)))
+            .set_read_timeout(Some(Duration::from_secs(10)))
             .map_err(|e| P2pError::Io(e.to_string()))?;
         let (peer_id, locator, height) = {
             let mut eng = engine.lock().expect("engine");

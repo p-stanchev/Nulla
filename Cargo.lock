@@ -1214,6 +1214,7 @@ dependencies = [
  "nulla-consensus",
  "nulla-core",
  "num-bigint",
+ "serde",
  "sled",
  "tempfile",
  "thiserror",
