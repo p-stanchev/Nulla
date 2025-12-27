@@ -526,7 +526,9 @@ fn build_block(
         prev: prev_hash,
         tx_merkle_root: tx_merkle_root(&txs),
         commitment_root,
-        timestamp: current_time(),
+        // Ensure timestamp is above MTP to avoid perpetual mining failures when
+        // the hardcoded genesis is in the future relative to local wall clock.
+        timestamp: current_time().max(_median_time_past.saturating_add(1)),
         bits,
         nonce: 0,
     };
