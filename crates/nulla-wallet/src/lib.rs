@@ -17,7 +17,7 @@ use zeroize::Zeroizing;
 
 use nulla_core::{
     Amount, Hash32, OutPoint, Transaction, TransactionKind, TransparentInput, TransparentOutput,
-    PROTOCOL_VERSION,
+    CHAIN_ID, PROTOCOL_VERSION,
 };
 
 pub mod rpc_client;
@@ -349,6 +349,7 @@ impl Wallet {
 
 fn tx_sighash(tx: &Transaction, input_idx: usize, pk_hash: [u8; 20]) -> Vec<u8> {
     let mut data = Vec::new();
+    data.extend_from_slice(CHAIN_ID.as_bytes());
     data.extend_from_slice(&tx.version.to_le_bytes());
     data.extend_from_slice(&(tx.transparent_inputs.len() as u64).to_le_bytes());
     for (i, inp) in tx.transparent_inputs.iter().enumerate() {
@@ -378,7 +379,8 @@ fn encrypt_key(priv_bytes: &[u8], password: &str) -> Result<EncryptedKey> {
     argon2_params()
         .hash_password_into(password.as_bytes(), salt_bytes, &mut key[..])
         .map_err(|e| anyhow!(e.to_string()))?;
-    let cipher = XChaCha20Poly1305::new((&*key).into());
+    let cipher =
+        XChaCha20Poly1305::new_from_slice(&key[..]).map_err(|_| anyhow!("invalid key length"))?;
     let mut nonce = [0u8; 24];
     OsRng.fill_bytes(&mut nonce);
     let ciphertext = cipher
@@ -400,11 +402,21 @@ fn decrypt_key(enc: &EncryptedKey, password: &str) -> Result<Vec<u8>> {
     argon2_params()
         .hash_password_into(password.as_bytes(), salt_bytes, &mut key[..])
         .map_err(|e| anyhow!(e.to_string()))?;
-    let cipher = XChaCha20Poly1305::new((&*key).into());
+    if enc.nonce.len() != 24 {
+        return Err(anyhow!("invalid nonce length"));
+    }
+    if enc.ciphertext.is_empty() {
+        return Err(anyhow!("empty ciphertext"));
+    }
+    let cipher =
+        XChaCha20Poly1305::new_from_slice(&key[..]).map_err(|_| anyhow!("invalid key length"))?;
     let nonce = XNonce::from_slice(&enc.nonce);
     let plaintext = cipher
         .decrypt(nonce, enc.ciphertext.as_ref())
-        .map_err(|e| anyhow!(e.to_string()))?;
+        .map_err(|_| anyhow!("authentication failed"))?;
+    if plaintext.len() != 32 {
+        return Err(anyhow!("invalid decrypted key length"));
+    }
     Ok(plaintext)
 }
 
@@ -484,4 +496,27 @@ pub fn nul_to_atoms(s: &str) -> Result<u64> {
         .and_then(|w| w.checked_add(frac))
         .ok_or_else(|| anyhow!("amount overflow"))?;
     Ok(atoms)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn encrypt_decrypt_roundtrip_and_rejects_tamper() {
+        let priv_key = [7u8; 32];
+        let password = "passw0rd!";
+        let enc = encrypt_key(&priv_key, password).expect("encrypt");
+        let dec = decrypt_key(&enc, password).expect("decrypt");
+        assert_eq!(dec, priv_key);
+
+        let mut tampered = enc.clone();
+        // Flip a bit in ciphertext to trigger auth failure.
+        tampered.ciphertext[0] ^= 0xff;
+        let err = decrypt_key(&tampered, password).expect_err("tamper must fail");
+        assert!(
+            err.to_string().contains("authentication failed"),
+            "expected auth failure, got {err:?}"
+        );
+    }
 }

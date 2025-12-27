@@ -435,8 +435,9 @@ struct PeerState {
     provide_relay: bool,
     relay_slot: Option<u32>,
     score: u32,
-    msg_count: u32,
-    window_start: Option<Instant>,
+    rate_tokens: f64,
+    rate_last: Option<Instant>,
+    rate_penalty: f64,
     sent_getaddr: bool,
     last_getaddr: Option<Instant>,
     addr: Option<SocketAddr>,
@@ -994,18 +995,30 @@ impl P2pEngine {
         }
         {
             let peer = self.peers.entry(peer_id).or_default();
-            // Simple rate limit: MAX_MSGS_PER_SEC per peer.
             let now = Instant::now();
-            if let Some(start) = peer.window_start {
-                if now.duration_since(start) > Duration::from_secs(1) {
-                    peer.window_start = Some(now);
-                    peer.msg_count = 0;
-                }
-            } else {
-                peer.window_start = Some(now);
+            let capacity = MAX_MSGS_PER_SEC as f64;
+            let refill_rate = MAX_MSGS_PER_SEC as f64;
+            // Initialize token bucket.
+            if peer.rate_last.is_none() {
+                peer.rate_last = Some(now);
+                peer.rate_tokens = capacity;
+                peer.rate_penalty = 1.0;
             }
-            peer.msg_count = peer.msg_count.saturating_add(1);
-            if peer.msg_count > MAX_MSGS_PER_SEC {
+            if let Some(last) = peer.rate_last {
+                let elapsed = now.saturating_duration_since(last).as_secs_f64();
+                if elapsed > 0.0 {
+                    peer.rate_tokens =
+                        (peer.rate_tokens + elapsed * refill_rate).min(capacity);
+                    peer.rate_last = Some(now);
+                }
+            }
+            let cost = 1.0;
+            if peer.rate_tokens >= cost {
+                peer.rate_tokens -= cost;
+                peer.rate_penalty = 1.0;
+            } else {
+                peer.rate_tokens -= capacity * peer.rate_penalty;
+                peer.rate_penalty = (peer.rate_penalty * 2.0).min(16.0);
                 peer.score = peer.score.saturating_add(1);
                 if peer.score >= self.policy.ban_threshold {
                     peer.disconnected = true;

@@ -2,7 +2,9 @@ use std::collections::{HashMap, HashSet};
 
 use blake3::Hasher;
 use k256::ecdsa::{signature::Verifier, Signature, VerifyingKey};
-use nulla_core::{txid, Amount, Hash32, OutPoint, Transaction, TransactionKind, TxId};
+use nulla_core::{
+    txid, Amount, Hash32, OutPoint, Transaction, TransactionKind, TxId, CHAIN_ID,
+};
 
 pub trait ChainView {
     /// Returns (value, pubkey_hash) for an outpoint if unspent in best chain.
@@ -281,6 +283,7 @@ fn pubkey_hash_matches(pubkey: &[u8], expected: [u8; 20]) -> bool {
 fn tx_sighash(tx: &Transaction, resolved_inputs: &[(u64, [u8; 20], &Vec<u8>, &Vec<u8>, &OutPoint)]) -> Vec<u8> {
     // Simple, deterministic sighash: version || inputs || outputs
     let mut data = Vec::new();
+    data.extend_from_slice(CHAIN_ID.as_bytes());
     data.extend_from_slice(&tx.version.to_le_bytes());
     data.extend_from_slice(&(tx.transparent_inputs.len() as u64).to_le_bytes());
     for (i, inp) in tx.transparent_inputs.iter().enumerate() {

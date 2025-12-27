@@ -572,6 +572,13 @@ impl ChainStore {
         validate_block_with_prev_bits(prev_entry.block.header.bits, Some(mtp), &block)
             .map_err(|e| format!("{e:?}"))?;
 
+        let computed_root = self
+            .preview_commitment_root(prev, &block.txs)
+            .map_err(|e| format!("commitment root preview failed: {e}"))?;
+        if computed_root != block.header.commitment_root {
+            return Err("commitment_root mismatch".into());
+        }
+
         let work = work_from_bits(block.header.bits).map_err(|e| e.to_string())?;
         let cum_work = &prev_entry.cumulative_work + work;
         let height = prev_entry.height + 1;
@@ -656,7 +663,7 @@ mod tests {
     #[cfg(feature = "dev-pow")]
     use nulla_core::{
         txid, Amount, BlockHeader, Commitment, Transaction, TransactionKind, GENESIS_BITS,
-        GENESIS_NONCE, GENESIS_TIMESTAMP, PROTOCOL_VERSION,
+        GENESIS_NONCE, GENESIS_TIMESTAMP, HASH32_LEN, PROTOCOL_VERSION,
     };
     #[cfg(feature = "dev-pow")]
     use tempfile::tempdir;
@@ -765,6 +772,21 @@ mod tests {
         }
         let chain = ChainStore::load_or_init(&path, genesis).unwrap();
         assert_eq!(chain.best_entry().height, 5);
+    }
+
+    #[test]
+    #[cfg(feature = "dev-pow")]
+    fn reject_block_with_wrong_commitment_root() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("db");
+        let genesis = make_genesis();
+        let mut chain = ChainStore::load_or_init(&path, genesis.clone()).unwrap();
+
+        // Build a valid block then tamper with the commitment_root.
+        let mut blk = build_block(&chain, 1, GENESIS_BITS);
+        blk.header.commitment_root = Hash32::from([9u8; HASH32_LEN]);
+        let err = chain.insert_block(blk).expect_err("must reject bad root");
+        assert!(err.contains("commitment_root mismatch"));
     }
 
     #[test]
