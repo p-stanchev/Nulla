@@ -97,6 +97,8 @@ Env fallbacks: `NULLA_LISTEN`, `NULLA_PEERS`, `NULLA_SEEDS`, `NULLA_DB`, `NULLA_
 - Seeds: `NULLA_SEEDS` (comma-separated `host:port`), used if no explicit `--peers` provided.
 - Sync/roles: mining and mempool processing stay off until local height catches the best peer height (initial-sync gate). Use `--no-mine`/`NULLA_NO_MINE` for follower/seed nodes.
 - Difficulty: LWMA(60) targeting 60s with per-block drop clamp (consensus).
+- Optional bootstrap HTTP (seed-only): `--bootstrap-listen 0.0.0.0:8080` serves `GET /peers` -> JSON list of reachable peers.
+- Optional relay/proxy (seed-only, use sparingly): `--relay-listen 0.0.0.0:28500 --relay-target <host:port>` forwards raw TCP between inbound connections and the target peer. Intended only for a few NAT’d miners; keep off otherwise.
 
 Wallet (RPC-only; does **not** open the node DB)
 - Init: `cargo run -p nulla-wallet -- init`

@@ -7,9 +7,11 @@ mod rpc;
 
 use clap::Parser;
 use reqwest::blocking;
+use std::collections::HashSet;
 use std::env;
 use std::fs;
-use std::net::{SocketAddr, TcpListener};
+use std::io::{Read, Write};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -57,6 +59,15 @@ struct Config {
     /// Disable mining (follower/seed mode). Overrides --mine.
     #[arg(long = "no-mine")]
     no_mine: bool,
+    /// Optional HTTP bootstrap endpoint (seed only), e.g. 0.0.0.0:8080
+    #[arg(long = "bootstrap-listen")]
+    bootstrap_listen: Option<String>,
+    /// Optional TCP relay listener (seed only), e.g. 0.0.0.0:28500
+    #[arg(long = "relay-listen")]
+    relay_listen: Option<String>,
+    /// Optional TCP relay target (where to forward relay connections), e.g. 1.2.3.4:27444
+    #[arg(long = "relay-target")]
+    relay_target: Option<String>,
     /// Attempt NAT-PMP/UPnP port mapping for the listen port (opt-in).
     #[arg(long = "nat")]
     nat: bool,
@@ -147,6 +158,15 @@ fn main() {
 
     let listener = TcpListener::bind(cfg.listen).expect("bind p2p socket");
     let _server = P2pEngine::serve_incoming(Arc::clone(&p2p), listener);
+
+    if let Some(addr) = cfg.bootstrap_listen {
+        println!("Bootstrap HTTP endpoint on {addr}");
+        start_bootstrap_server(Arc::clone(&p2p), addr);
+    }
+    if let (Some(listen), Some(target)) = (cfg.relay_listen, cfg.relay_target) {
+        println!("Relay proxy listening on {listen}, forwarding to {target}");
+        start_relay_proxy(listen, target);
+    }
 
     // Compute best chain and missing bodies, then request them on connect.
     let (_best_tip, best_chain, missing) = compute_best_chain_and_missing(&chain_db);
@@ -749,6 +769,19 @@ fn resolve_config(cli: Config) -> ResolvedConfig {
         }
     }
 
+    let bootstrap_listen = cli
+        .bootstrap_listen
+        .or_else(|| env::var("NULLA_BOOTSTRAP_LISTEN").ok())
+        .and_then(|s| s.parse().ok());
+    let relay_listen = cli
+        .relay_listen
+        .or_else(|| env::var("NULLA_RELAY_LISTEN").ok())
+        .and_then(|s| s.parse().ok());
+    let relay_target = cli
+        .relay_target
+        .or_else(|| env::var("NULLA_RELAY_TARGET").ok())
+        .and_then(|s| s.parse().ok());
+
     // Drop any self-references to avoid self-dial/loopback attempts.
     let listen_addr = listen;
     let peers = peers
@@ -814,6 +847,9 @@ fn resolve_config(cli: Config) -> ResolvedConfig {
         listen,
         peers,
         seeds,
+        bootstrap_listen,
+        relay_listen,
+        relay_target,
         db_path,
         p2p_db_path,
         reorg_cap,
@@ -829,6 +865,9 @@ struct ResolvedConfig {
     listen: SocketAddr,
     peers: Vec<SocketAddr>,
     seeds: Vec<SocketAddr>,
+    bootstrap_listen: Option<SocketAddr>,
+    relay_listen: Option<SocketAddr>,
+    relay_target: Option<SocketAddr>,
     db_path: PathBuf,
     p2p_db_path: PathBuf,
     reorg_cap: u64,
@@ -858,6 +897,94 @@ fn wait_for_missing(db: &ChainDb, chain: &[Hash32], timeout: Duration) {
         }
         thread::sleep(Duration::from_millis(100));
     }
+}
+
+fn start_bootstrap_server(p2p: Arc<Mutex<P2pEngine>>, listen: SocketAddr) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        let listener = match TcpListener::bind(listen) {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!("bootstrap: failed to bind {listen}: {e}");
+                return;
+            }
+        };
+        loop {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf);
+                let req_line = String::from_utf8_lossy(&buf);
+                let ok = req_line.starts_with("GET /peers");
+                if !ok {
+                    let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length:0\r\n\r\n");
+                    continue;
+                }
+                let addrs: Vec<String> = {
+                    let eng = p2p.lock().ok();
+                    if let Some(eng) = eng {
+                        let mut set = HashSet::new();
+                        for p in eng.peers_snapshot() {
+                            set.insert(p.addr);
+                        }
+                        for a in eng.addr_book_snapshot() {
+                            set.insert(a);
+                        }
+                        set.into_iter()
+                            .take(512)
+                            .map(|a| a.to_string())
+                            .collect()
+                    } else {
+                        Vec::new()
+                    }
+                };
+                let body = serde_json::to_vec(&addrs).unwrap_or_else(|_| b"[]".to_vec());
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(resp.as_bytes());
+                let _ = stream.write_all(&body);
+            }
+        }
+    })
+}
+
+/// Very simple TCP relay/proxy: accepts connections on `listen`, connects to `target`, and pipes bytes.
+/// Intended for seed-only use to help a few NAT'd peers; not a consensus component.
+fn start_relay_proxy(listen: SocketAddr, target: SocketAddr) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        let listener = match TcpListener::bind(listen) {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!("relay: failed to bind {listen}: {e}");
+                return;
+            }
+        };
+        for inbound in listener.incoming().flatten() {
+            let target_addr = target;
+            thread::spawn(move || {
+                match TcpStream::connect(target_addr) {
+                    Ok(mut outbound) => {
+                        if let (Ok(mut inbound_r), Ok(mut inbound_w)) =
+                            (inbound.try_clone(), inbound.try_clone())
+                        {
+                            if let Ok(mut outbound_w) = outbound.try_clone() {
+                                // pipe inbound -> outbound
+                                let t1 = thread::spawn(move || {
+                                    let _ = std::io::copy(&mut inbound_r, &mut outbound_w);
+                                });
+                                // pipe outbound -> inbound
+                                let _ = std::io::copy(&mut outbound, &mut inbound_w);
+                                let _ = t1.join();
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("relay: failed to connect to target {target_addr}: {e}");
+                    }
+                }
+            });
+        }
+    })
 }
 
 #[cfg(test)]

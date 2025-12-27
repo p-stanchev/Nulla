@@ -556,7 +556,7 @@ impl P2pEngine {
 
     pub fn peers_snapshot(&self) -> Vec<PeerInfo> {
         let mut out = Vec::new();
-        for (id, peer) in self.peers.iter() {
+        for (_id, peer) in self.peers.iter() {
             if peer.disconnected {
                 continue;
             }
@@ -581,6 +581,11 @@ impl P2pEngine {
 
     pub fn addr_table_len(&self) -> usize {
         self.addr_book.len()
+    }
+
+    /// Snapshot of addr book contents (unordered, may include stale entries).
+    pub fn addr_book_snapshot(&self) -> Vec<SocketAddr> {
+        self.addr_book.keys().copied().collect()
     }
 
     pub fn missing_blocks_on_best(&self, max: usize) -> Vec<Hash32> {
