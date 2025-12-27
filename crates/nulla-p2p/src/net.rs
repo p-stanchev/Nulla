@@ -421,6 +421,8 @@ struct PeerState {
     sent_getaddr: bool,
     last_getaddr: Option<Instant>,
     addr: Option<SocketAddr>,
+    inbound: bool,
+    outbound: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -559,10 +561,10 @@ impl P2pEngine {
                 continue;
             }
             if let Some(addr) = peer.addr {
-                let outbound = self.outbound.contains_key(id);
+                let outbound = peer.outbound;
                 out.push(PeerInfo {
                     addr,
-                    inbound: !outbound,
+                    inbound: peer.inbound,
                     outbound,
                     height: peer.height,
                 });
@@ -1207,8 +1209,16 @@ impl P2pEngine {
                     let guard = eng_hb.lock().ok();
                     if let Some(mut eng) = guard {
                         let connected = eng.peer_count();
-                        let outbound = eng.outbound.len();
-                        let inbound = connected.saturating_sub(outbound);
+                        let outbound = eng
+                            .peers
+                            .values()
+                            .filter(|p| !p.disconnected && p.outbound)
+                            .count();
+                        let inbound = eng
+                            .peers
+                            .values()
+                            .filter(|p| !p.disconnected && p.inbound)
+                            .count();
                         let addr_table = eng.addr_book.len();
                         info!(
                             "net: peers connected={} outbound={} inbound={} addr_table={}",
@@ -1274,13 +1284,10 @@ impl P2pEngine {
                     }
                 }
                 guard.outbound.insert(peer_id, tx_out.clone());
-                if let Some(ps) = guard.peers.get_mut(&peer_id) {
-                    ps.addr = peer_addr;
-                } else {
-                    let mut ps = PeerState::default();
-                    ps.addr = peer_addr;
-                    guard.peers.insert(peer_id, ps);
-                }
+                let ps = guard.peers.entry(peer_id).or_insert_with(PeerState::default);
+                ps.addr = peer_addr;
+                ps.inbound = true;
+                ps.outbound = false;
                 drop(guard);
                 let eng = Arc::clone(&engine);
                 thread::spawn(move || {
@@ -1373,13 +1380,9 @@ impl P2pEngine {
             let mut eng = engine.lock().expect("engine");
             eng.record_dial_success(addr);
             eng.outbound.insert(peer_id, tx_out.clone());
-            if let Some(ps) = eng.peers.get_mut(&peer_id) {
-                ps.addr = Some(addr);
-            } else {
-                let mut ps = PeerState::default();
-                ps.addr = Some(addr);
-                eng.peers.insert(peer_id, ps);
-            }
+            let ps = eng.peers.entry(peer_id).or_insert_with(PeerState::default);
+            ps.addr = Some(addr);
+            ps.outbound = true;
         }
         let eng = Arc::clone(&engine);
         let handle = thread::spawn(move || {
