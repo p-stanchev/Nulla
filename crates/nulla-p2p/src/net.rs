@@ -17,6 +17,7 @@ use nulla_core::{
 };
 use num_bigint::BigUint;
 use thiserror::Error;
+use std::net::IpAddr;
 
 const TREE_HEADERS: &str = "headers";
 const TREE_META: &str = "meta";
@@ -611,6 +612,18 @@ impl P2pEngine {
         if !Self::valid_gossip_addr(&addr) {
             return;
         }
+        // Enforce unique IP: keep only one entry per IP, prefer newest.
+        let ip = Self::ip_only(&addr);
+        if let Some((existing_addr, _)) = self
+            .addr_book
+            .iter()
+            .find(|(a, _)| Self::ip_only(a) == ip)
+            .map(|(a, ts)| (*a, *ts))
+        {
+            // Drop the old entry (and its persisted record) before inserting the new one.
+            self.addr_book.remove(&existing_addr);
+            let _ = self.addr_tree.remove(existing_addr.to_string().as_bytes());
+        }
         if self.addr_book.len() >= MAX_ADDR_TABLE {
             // simple LRU-ish: drop oldest
             if let Some(oldest) = self
@@ -632,6 +645,7 @@ impl P2pEngine {
 
     fn load_addr_book(tree: &sled::Tree) -> HashMap<SocketAddr, u64> {
         let mut out = HashMap::new();
+        let mut by_ip: HashMap<IpAddr, (SocketAddr, u64)> = HashMap::new();
         let now = SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -655,11 +669,24 @@ impl P2pEngine {
                         let _ = tree.remove(k);
                         continue;
                     }
-                    out.insert(addr, last_seen);
+                    let ip = Self::ip_only(&addr);
+                    // keep the newest entry per IP
+                    let replace = match by_ip.get(&ip) {
+                        Some((_, ts)) => last_seen > *ts,
+                        None => true,
+                    };
+                    if replace {
+                        if let Some((old_addr, _)) = by_ip.insert(ip, (addr, last_seen)) {
+                            let _ = tree.remove(old_addr.to_string().as_bytes());
+                        }
+                    }
                 } else {
                     let _ = tree.remove(k);
                 }
             }
+        }
+        for (_ip, (addr, ts)) in by_ip {
+            out.insert(addr, ts);
         }
         // Cap to MAX_ADDR_TABLE by dropping oldest.
         if out.len() > MAX_ADDR_TABLE {
@@ -768,6 +795,13 @@ impl P2pEngine {
     fn record_dial_success(&mut self, addr: SocketAddr) {
         self.dial_failures.remove(&addr);
         self.dial_history.insert(addr, Instant::now());
+    }
+
+    fn ip_only(addr: &SocketAddr) -> IpAddr {
+        match addr {
+            SocketAddr::V4(v4) => IpAddr::V4(*v4.ip()),
+            SocketAddr::V6(v6) => IpAddr::V6(*v6.ip()),
+        }
     }
 
     fn valid_gossip_addr(addr: &SocketAddr) -> bool {
