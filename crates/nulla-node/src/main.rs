@@ -302,6 +302,9 @@ fn main() {
     let mut last_block_reason: Option<String> = None;
     let mut last_gate_log = Instant::now();
     let mut last_progress_log = Instant::now();
+    let mut last_heartbeat = Instant::now();
+    let mut blocks_mined_since_heartbeat = 0u64;
+    let mut last_heartbeat_time = Instant::now();
     loop {
         let best_height = { chain.lock().expect("chain lock").best_entry().height };
         let (peer_height, peer_count) = {
@@ -453,6 +456,29 @@ fn main() {
             "Block {:>4} | hash={} | height={} | commitments={}",
             best_height, best_hash, best_height, state_commitments
         );
+
+        blocks_mined_since_heartbeat += 1;
+
+        // Print mining heartbeat every 30 seconds to show we're actively mining.
+        let now = Instant::now();
+        if now.duration_since(last_heartbeat) >= Duration::from_secs(30) {
+            let elapsed = now.duration_since(last_heartbeat_time).as_secs_f64();
+            let hashrate = if elapsed > 0.0 {
+                blocks_mined_since_heartbeat as f64 / elapsed
+            } else {
+                0.0
+            };
+            println!(
+                "Mining: {} blocks/s | height {} | peers {} | mempool {}",
+                format!("{:.2}", hashrate),
+                best_height,
+                peer_count,
+                txs_from_pool.len()
+            );
+            last_heartbeat = now;
+            last_heartbeat_time = now;
+            blocks_mined_since_heartbeat = 0;
+        }
 
         thread::sleep(Duration::from_secs(1));
         height = height.saturating_add(1);
