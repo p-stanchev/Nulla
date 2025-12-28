@@ -422,9 +422,7 @@ fn main() {
             let mut chain_lock = chain.lock().expect("chain lock");
             let prev = chain_lock.best_hash();
             let prev_bits = chain_lock.best_bits();
-            let mtp = chain_lock
-                .median_time_past(prev)
-                .expect("mtp available for non-genesis");
+            let mtp = chain_lock.median_time_past(prev).unwrap_or(0);
 
             let next_bits = chain_lock.next_bits();
             let block = build_block(prev, prev_bits, mtp, &chain_lock, txs, next_bits);
