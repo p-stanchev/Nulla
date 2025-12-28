@@ -43,18 +43,35 @@ fn tx_merkle_root_for_genesis(txs: &[Transaction]) -> Hash32 {
     if txs.is_empty() {
         return Hash32::zero();
     }
-    let mut acc = Hash32::zero();
-    for tx in txs {
-        let h = txid(tx).expect("txid");
-        acc = xor_hash(acc, h);
+
+    let mut hashes: Vec<Hash32> = txs
+        .iter()
+        .map(|tx| txid(tx).expect("txid"))
+        .collect();
+
+    while hashes.len() > 1 {
+        let mut next_level = Vec::new();
+        for i in (0..hashes.len()).step_by(2) {
+            if i + 1 < hashes.len() {
+                let combined = merkle_parent_hash(&hashes[i], &hashes[i + 1]);
+                next_level.push(combined);
+            } else {
+                let combined = merkle_parent_hash(&hashes[i], &hashes[i]);
+                next_level.push(combined);
+            }
+        }
+        hashes = next_level;
     }
-    acc
+
+    hashes[0]
 }
 
-fn xor_hash(a: Hash32, b: Hash32) -> Hash32 {
+fn merkle_parent_hash(left: &Hash32, right: &Hash32) -> Hash32 {
+    let mut h = blake3::Hasher::new();
+    h.update(b"NULLA::MERKLE::V0");
+    h.update(left.as_bytes());
+    h.update(right.as_bytes());
     let mut out = [0u8; 32];
-    for i in 0..32 {
-        out[i] = a.as_bytes()[i] ^ b.as_bytes()[i];
-    }
+    h.finalize_xof().fill(&mut out);
     Hash32(out)
 }

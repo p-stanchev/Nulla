@@ -111,6 +111,16 @@ pub fn hash_meets_target(hash_be: &[u8; 32], target: &BigUint) -> bool {
 ///
 /// `max_increase = prev_target * MAX_TARGET_INCREASE_NUM / MAX_TARGET_INCREASE_DEN`.
 /// Returns an error if `next_target` exceeds that bound.
+///
+/// IMPORTANT: This clamp applies per-block, not cumulatively. Over N blocks,
+/// an attacker can compound the difficulty drop to:
+///   cumulative_increase ≈ (1.25)^N - 1
+/// For example, 10 consecutive 25% drops result in ~831% easier mining.
+///
+/// Future versions should consider:
+/// - Tracking cumulative difficulty changes over a rolling window
+/// - Implementing stronger anti-timewarp protections
+/// - Adding minimum difficulty change requirements when timestamps advance slowly
 pub fn enforce_max_difficulty_drop(prev_bits: u32, next_bits: u32) -> Result<(), ConsensusError> {
     let prev_target = bits_to_target(prev_bits)?;
     let next_target = bits_to_target(next_bits)?;

@@ -374,6 +374,8 @@ fn main() {
                 last_block_reason = Some(reason);
                 last_gate_log = now;
             }
+            // Reset gate so we log "Mining enabled" when conditions clear.
+            mining_gate_active = true;
             thread::sleep(Duration::from_millis(200));
             continue;
         } else if mining_gate_active {
@@ -526,9 +528,13 @@ fn build_block(
         prev: prev_hash,
         tx_merkle_root: tx_merkle_root(&txs),
         commitment_root,
-        // Ensure timestamp is above MTP to avoid perpetual mining failures when
-        // the hardcoded genesis is in the future relative to local wall clock.
-        timestamp: current_time().max(_median_time_past.saturating_add(1)),
+        // Timestamp must be: max(current_time, MTP + 1)
+        // This prevents both time-warp attacks and mining failures when genesis is in the future.
+        timestamp: {
+            let now = current_time();
+            let min_time = _median_time_past.saturating_add(1);
+            now.max(min_time)
+        },
         bits,
         nonce: 0,
     };
@@ -607,18 +613,53 @@ fn coinbase_commitment(height: u64) -> Commitment {
     Commitment(bytes)
 }
 
-/// Compute a simple tx merkle root (devnet v0).
+/// Compute transaction merkle root using a proper Merkle tree construction.
+///
+/// Uses a binary tree with hash(left || right) for internal nodes.
+/// This prevents transaction reordering and cancellation attacks that
+/// would be possible with XOR-based schemes.
 fn tx_merkle_root(txs: &[Transaction]) -> Hash32 {
     if txs.is_empty() {
         return Hash32::zero();
     }
 
-    let mut acc = Hash32::zero();
-    for tx in txs {
-        let h = txid(tx).expect("txid must succeed");
-        acc = xor_hash(acc, h);
+    // Collect leaf hashes (txids).
+    let mut hashes: Vec<Hash32> = txs
+        .iter()
+        .map(|tx| txid(tx).expect("txid must succeed"))
+        .collect();
+
+    // Build Merkle tree bottom-up.
+    while hashes.len() > 1 {
+        let mut next_level = Vec::new();
+
+        for i in (0..hashes.len()).step_by(2) {
+            if i + 1 < hashes.len() {
+                // Hash pair: H(left || right)
+                let combined = merkle_parent_hash(&hashes[i], &hashes[i + 1]);
+                next_level.push(combined);
+            } else {
+                // Odd number of nodes: duplicate the last hash (Bitcoin-style).
+                let combined = merkle_parent_hash(&hashes[i], &hashes[i]);
+                next_level.push(combined);
+            }
+        }
+
+        hashes = next_level;
     }
-    acc
+
+    hashes[0]
+}
+
+/// Compute the parent hash for a Merkle tree node.
+fn merkle_parent_hash(left: &Hash32, right: &Hash32) -> Hash32 {
+    let mut h = blake3::Hasher::new();
+    h.update(b"NULLA::MERKLE::V0");
+    h.update(left.as_bytes());
+    h.update(right.as_bytes());
+    let mut out = [0u8; 32];
+    h.finalize_xof().fill(&mut out);
+    Hash32(out)
 }
 
 /// Compute a block hash from its header.
@@ -718,15 +759,6 @@ fn detect_local_ipv4() -> Option<std::net::Ipv4Addr> {
         SocketAddr::V4(v4) => Some(*v4.ip()),
         SocketAddr::V6(_) => None,
     }
-}
-
-/// XOR-combine two 32-byte hashes.
-fn xor_hash(a: Hash32, b: Hash32) -> Hash32 {
-    let mut out = [0u8; 32];
-    for i in 0..32 {
-        out[i] = a.as_bytes()[i] ^ b.as_bytes()[i];
-    }
-    Hash32(out)
 }
 
 fn render_progress_bar(width: usize, fraction: f64) -> String {

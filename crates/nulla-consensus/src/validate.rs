@@ -80,20 +80,23 @@ pub fn validate_header_with_prev_bits(
 /// - block structural sanity (via core)
 /// - header sanity (version, timestamp bounds, valid bits)
 /// - proof-of-work
+///
+/// Note: This function can only validate genesis blocks (prev == zero).
+/// For non-genesis blocks, use `validate_block_with_prev_bits` which
+/// requires the previous block's bits and median-time-past.
 pub fn validate_block_consensus(block: &Block) -> Result<(), ConsensusError> {
     block
         .validate_sanity()
         .map_err(|_| ConsensusError::InvalidHeader("block sanity failed"))?;
 
-    let mtp = if block.header.prev == Hash32::zero() {
-        None
-    } else {
+    // Only genesis blocks can be validated without chain context.
+    if block.header.prev != Hash32::zero() {
         return Err(ConsensusError::InvalidHeader(
             "missing median-time-past for non-genesis",
         ));
-    };
+    }
 
-    validate_header_sanity(&block.header, mtp)?;
+    validate_header_sanity(&block.header, None)?;
     validate_pow(&block.header)?;
 
     Ok(())
@@ -129,6 +132,9 @@ pub fn is_timestamp_within_drift(candidate: u64, reference: u64, max_drift_secs:
 }
 
 /// Compute Median-Time-Past over the last up-to-11 timestamps.
+///
+/// Returns the lower median (Bitcoin-compatible) for consistent behavior
+/// across even and odd-length windows.
 pub fn median_time_past(timestamps: &[u64]) -> Option<u64> {
     if timestamps.is_empty() {
         return None;
@@ -136,7 +142,10 @@ pub fn median_time_past(timestamps: &[u64]) -> Option<u64> {
     let start = timestamps.len().saturating_sub(MTP_WINDOW);
     let mut buf: Vec<u64> = timestamps[start..].iter().copied().collect();
     buf.sort_unstable();
-    let mid = buf.len() / 2;
+    // Use the lower median: for even-length arrays, take the element at (len-1)/2
+    // For odd-length, (len-1)/2 gives the true median.
+    // Examples: len=4 -> idx 1, len=5 -> idx 2
+    let mid = buf.len().saturating_sub(1) / 2;
     Some(buf[mid])
 }
 
